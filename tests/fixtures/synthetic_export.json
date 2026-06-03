@@ -1,0 +1,193 @@
+{
+  "generated_at": "2026-05-28 13:26:40",
+  "window": "monthly",
+  "context_messages": 10,
+  "watermark": {
+    "max_date_raw": 801606400000000000,
+    "max_message_rowid": 12
+  },
+  "conversations": [
+    {
+      "chat_rowid": 6,
+      "name": "Dana West",
+      "handle": "+15550000105",
+      "is_named": true,
+      "is_groupchat": false,
+      "responded": false,
+      "members": null,
+      "contact_details": {
+        "name": "Dana West",
+        "organization": null,
+        "job_title": null,
+        "birthday": null,
+        "note": null,
+        "phones": [
+          "+15550000105"
+        ],
+        "emails": [],
+        "addresses": []
+      },
+      "window_messages": 2,
+      "conversation": [
+        {
+          "message_rowid": 11,
+          "date": 801606400000000000,
+          "datetime": "2026-05-27 13:26:40",
+          "sender": "Dana West",
+          "text": "two texts"
+        },
+        {
+          "message_rowid": 12,
+          "date": 801606400000000000,
+          "datetime": "2026-05-27 13:26:40",
+          "sender": "Dana West",
+          "text": "same second"
+        }
+      ]
+    },
+    {
+      "chat_rowid": 3,
+      "name": "+15550000103",
+      "handle": "+15550000103",
+      "is_named": false,
+      "is_groupchat": false,
+      "responded": false,
+      "members": null,
+      "contact_details": null,
+      "window_messages": 2,
+      "conversation": [
+        {
+          "message_rowid": 5,
+          "date": 801088000000000000,
+          "datetime": "2026-05-21 13:26:40",
+          "sender": "me",
+          "text": "is this still your number?"
+        },
+        {
+          "message_rowid": 6,
+          "date": 801520000000000000,
+          "datetime": "2026-05-26 13:26:40",
+          "sender": "+15550000103",
+          "text": "yep it's me"
+        }
+      ]
+    },
+    {
+      "chat_rowid": 2,
+      "name": "Blair Stone",
+      "handle": "+15550000102",
+      "is_named": true,
+      "is_groupchat": false,
+      "responded": true,
+      "members": null,
+      "contact_details": {
+        "name": "Blair Stone",
+        "organization": "Globex",
+        "job_title": "Designer",
+        "birthday": null,
+        "note": null,
+        "phones": [
+          "+15550000102"
+        ],
+        "emails": [
+          "blair@example.com"
+        ],
+        "addresses": []
+      },
+      "window_messages": 2,
+      "conversation": [
+        {
+          "message_rowid": 3,
+          "date": 801174400000000000,
+          "datetime": "2026-05-22 13:26:40",
+          "sender": "Blair Stone",
+          "text": "did you see the game?"
+        },
+        {
+          "message_rowid": 4,
+          "date": 801433600000000000,
+          "datetime": "2026-05-25 13:26:40",
+          "sender": "me",
+          "text": "yeah what a finish"
+        }
+      ]
+    },
+    {
+      "chat_rowid": 1,
+      "name": "Avery Quinn",
+      "handle": "+15550000101",
+      "is_named": true,
+      "is_groupchat": false,
+      "responded": false,
+      "members": null,
+      "contact_details": {
+        "name": "Avery Quinn",
+        "organization": null,
+        "job_title": null,
+        "birthday": null,
+        "note": null,
+        "phones": [
+          "+15550000101"
+        ],
+        "emails": [],
+        "addresses": []
+      },
+      "window_messages": 2,
+      "conversation": [
+        {
+          "message_rowid": 1,
+          "date": 801260800000000000,
+          "datetime": "2026-05-23 13:26:40",
+          "sender": "me",
+          "text": "want to grab dinner this week?"
+        },
+        {
+          "message_rowid": 2,
+          "date": 801347200000000000,
+          "datetime": "2026-05-24 13:26:40",
+          "sender": "Avery Quinn",
+          "text": "yes! thursday works for me"
+        }
+      ]
+    },
+    {
+      "chat_rowid": 4,
+      "name": "Trail Crew",
+      "handle": null,
+      "is_named": true,
+      "is_groupchat": true,
+      "responded": true,
+      "members": [
+        "+15550000110",
+        "+15550000111"
+      ],
+      "contact_details": null,
+      "window_messages": 2,
+      "conversation": [
+        {
+          "message_rowid": 7,
+          "date": 801001600000000000,
+          "datetime": "2026-05-20 13:26:40",
+          "sender": "+15550000110",
+          "text": "hike saturday?"
+        },
+        {
+          "message_rowid": 8,
+          "date": 801174400000000000,
+          "datetime": "2026-05-22 13:26:40",
+          "sender": "+15550000111",
+          "text": "i'm in"
+        }
+      ]
+    }
+  ],
+  "unresponded": [
+    {
+      "chat_rowid": 5,
+      "name": "Casey Vale",
+      "last_at": "2026-04-13 13:26:40",
+      "last_date_raw": 797804800000000000,
+      "days_waiting": 45
+    }
+  ]
+}

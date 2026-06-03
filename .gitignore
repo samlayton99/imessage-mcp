@@ -1,0 +1,28 @@
+# Privacy: never commit real message/contact data (CONTEXT "Privacy / data handling")
+exports/
+state.json
+state.json.lock
+*.state.lock
+sample_output/
+tests/fixtures/real_export_*.json
+text-triage-handoff/
+text-triage-handoff.zip
+raw_messages.sqlite
+
+# Secrets — per-host, never committed
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# macOS
+.DS_Store

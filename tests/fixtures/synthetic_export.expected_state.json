@@ -1,0 +1,129 @@
+{
+  "generated_at": "2026-05-28 13:26:40",
+  "watermark": {
+    "max_date_raw": 801606400000000000,
+    "max_message_rowid": 12
+  },
+  "unresponded": [
+    {
+      "chat_rowid": 5,
+      "name": "Casey Vale",
+      "last_at": "2026-04-13 13:26:40",
+      "days_waiting": 45
+    }
+  ],
+  "texts_today": {
+    "since": null,
+    "conversations": {}
+  },
+  "conversations": [
+    {
+      "chat_rowid": 6,
+      "name": "Dana West",
+      "is_group": false,
+      "handle": "+15550000105",
+      "members": null,
+      "status": "active",
+      "last_from": "them",
+      "last_message_at": "2026-05-27 13:26:40",
+      "last_updated": null,
+      "needs_reply": true,
+      "identity": null,
+      "summary": null,
+      "reply_reason": null,
+      "tags": [],
+      "daily": [],
+      "weekly": [],
+      "monthly": null,
+      "history": [],
+      "edited": {}
+    },
+    {
+      "chat_rowid": 3,
+      "name": "+15550000103",
+      "is_group": false,
+      "handle": "+15550000103",
+      "members": null,
+      "status": "active",
+      "last_from": "them",
+      "last_message_at": "2026-05-26 13:26:40",
+      "last_updated": null,
+      "needs_reply": true,
+      "identity": null,
+      "summary": null,
+      "reply_reason": null,
+      "tags": [],
+      "daily": [],
+      "weekly": [],
+      "monthly": null,
+      "history": [],
+      "edited": {}
+    },
+    {
+      "chat_rowid": 2,
+      "name": "Blair Stone",
+      "is_group": false,
+      "handle": "+15550000102",
+      "members": null,
+      "status": "active",
+      "last_from": "me",
+      "last_message_at": "2026-05-25 13:26:40",
+      "last_updated": null,
+      "needs_reply": false,
+      "identity": null,
+      "summary": null,
+      "reply_reason": null,
+      "tags": [],
+      "daily": [],
+      "weekly": [],
+      "monthly": null,
+      "history": [],
+      "edited": {}
+    },
+    {
+      "chat_rowid": 1,
+      "name": "Avery Quinn",
+      "is_group": false,
+      "handle": "+15550000101",
+      "members": null,
+      "status": "active",
+      "last_from": "them",
+      "last_message_at": "2026-05-24 13:26:40",
+      "last_updated": null,
+      "needs_reply": true,
+      "identity": null,
+      "summary": null,
+      "reply_reason": null,
+      "tags": [],
+      "daily": [],
+      "weekly": [],
+      "monthly": null,
+      "history": [],
+      "edited": {}
+    },
+    {
+      "chat_rowid": 4,
+      "name": "Trail Crew",
+      "is_group": true,
+      "handle": null,
+      "members": [
+        "+15550000110",
+        "+15550000111"
+      ],
+      "status": "active",
+      "last_from": "me",
+      "last_message_at": "2026-05-22 13:26:40",
+      "last_updated": null,
+      "needs_reply": false,
+      "identity": null,
+      "summary": null,
+      "reply_reason": null,
+      "tags": [],
+      "daily": [],
+      "weekly": [],
+      "monthly": null,
+      "history": [],
+      "edited": {}
+    }
+  ]
+}
