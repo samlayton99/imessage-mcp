@@ -1,31 +1,46 @@
-# conditions.yaml — deterministic steering knobs. Defaults equal the designed behavior.
-# This file is the source of truth: extract + schema read it via config.py. Edit a knob, not code.
-windows:
-  weekly_days: 7            # `--window weekly` extracts this many days (also sets the daily-note cap)
-  monthly_days: 30          # `--window monthly` extracts this many days (sets the weekly-note cap); e.g. 60 for a longer horizon
-  context_messages: 10      # raw msgs before the window for context; 0 = none
-  unresponded_lookback_days: 90  # how far back a 1:1 counts as a stale "owe a reply" (band: [window, lookback))
-  raw_store_days: 0        # raw-text window kept on the VPS deep-dive cache; 0 = keep forever (no pruning).
-                            # Not your archive: chat.db (Mac) + summaries/history (state.json) are permanent.
-conversation_filter:
+# conditions.yaml — everything you steer, in one place. Defaults equal the designed behavior.
+# Secrets (API keys, VPS tokens) live next to this in .env, never here.
+
+# ── 1. TEXT MESSAGE RULES ─ what gets read & summarized ──────────────────────
+messages:
+  weekly_days: 7
+  monthly_days: 30
+  context_messages: 10            # EXTRACTION lead-in: extra older msgs pulled in just BEFORE a window
+                                  # so a thread isn't cut mid-conversation. NOT an LLM-input cap. 0 = none.
+  unresponded_lookback_days: 90   # how far back a 1:1 counts as a stale "owe a reply"
   include_groups: true
-  named_only: false         # true = only address-book contacts
-  min_handle_digits: 10     # drop shortcodes / sub-10-digit senders (e.g. '38792')
+  named_only: false               # true = only address-book contacts
+  min_handle_digits: 10           # drop shortcodes / sub-10-digit senders (e.g. '38792')
   min_messages: 2
-models:                     # which model plays which role — fully customizable
-  daily: claude-sonnet-4-6
-  weekly: claude-opus-4-8
-  monthly: claude-opus-4-8
-  curator: claude-opus-4-8
+
+# ── 2. MODELS & BILLING ─ who runs each summary, and how you pay ─────────────
 engine:
-  provider: claude_code     # claude_code = headless `claude -p` | api_key = anthropic SDK
-live:
-  mode: interval            # interval = poll every N s | watch = FSEvents (later optimization)
-  interval_seconds: 30
-schedule:                   # when the VPS runs LLM summaries (local tz); raw updates live regardless
-  timezone: auto            # auto = use the Mac's system timezone; set explicitly (e.g. America/Los_Angeles) to override
-  daily:   ["on_open", "21:00"]
-  weekly:  ["mon 03:00"]
-  monthly: ["1 03:00"]
-tags:
-  auto_apply: true
+  provider: litellm               # litellm = any provider via API key (incl. Claude API) | agent_sdk = Claude Max plan
+  max_concurrency: 8              # how many summaries run at once
+  models:                         # per role. litellm names = <provider>/<model>
+    daily:   anthropic/claude-sonnet-4-6
+    weekly:  anthropic/claude-opus-4-8
+    monthly: anthropic/claude-opus-4-8
+    curator: anthropic/claude-opus-4-8
+  max_raw_messages:               # LLM-INPUT cap: most raw msgs from a window packed INTO one summary
+    daily: 0                      # call, per cadence (controls prompt size / token cost).
+    weekly: 0                     # This is what the model reads. 0 = send the whole window (no cap).
+    monthly: 0
+  # API keys live in .env (ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY …).
+  # provider: agent_sdk uses your Claude Max session — `claude setup-token`, no key needed.
+
+# ── 3. VPS ─ where state.json is owned & served (set this up later) ──────────
+vps:
+  url: ""                         # blank = run locally; later: https://triage.yourhost.com
+  raw_store_days: 0               # SERVER RETENTION: how long raw message TEXT is kept on the VPS for
+                                  # later look-back (not summaries, not sent to the model). 0 = keep forever.
+  schedule:
+    timezone: auto                # auto = the Mac's system timezone
+    daily:   ["on_open", "21:00"]
+    weekly:  ["mon 03:00"]
+    monthly: ["1 03:00"]
+  live:
+    mode: interval                # interval = poll every N s | watch = FSEvents (later)
+    interval_seconds: 30
+
+# ── 4. TAGS ─ edit watch.md (loose prose; the pipeline compiles it) ──────────

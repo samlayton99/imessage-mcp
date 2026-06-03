@@ -12,7 +12,7 @@ while `.venv/bin` is left behind. So the venv MUST live OUTSIDE the iCloud tree 
 ```bash
 mkdir -p ~/.venvs && python3 -m venv ~/.venvs/text-triage
 ~/.venvs/text-triage/bin/python -m pip install --upgrade pip pydantic pyyaml pytest
-cd <repo> && ~/.venvs/text-triage/bin/python -m pytest -q     # 116 tests, ~1s
+cd <repo> && ~/.venvs/text-triage/bin/python -m pytest -q     # 124 tests, ~1s
 ```
 
 The venv lives at `~/.venvs/text-triage` (out of iCloud's reach); the code stays in the repo. pytest
@@ -25,12 +25,12 @@ to a project-local `.venv` — straight back into the iCloud trap — and earlie
 `pyproject.toml` stays (standard; drives `pythonpath`); `uv.lock` is left as a harmless artifact for
 forkers, but the dev loop does not use uv.
 
-**The agent CANNOT run the suite itself — the human runs it and pastes the result.** The agent's
-sandboxed Bash can't see `.venv/lib/.../site-packages` (even sandbox-off; reports `No such file or
-directory`), and the external venv is outside its view too. Workflow: agent writes test + code
-(TDD), **human runs `~/.venvs/text-triage/bin/python -m pytest -q` at a checkpoint and pastes**;
-agent fixes from that. Batch work to keep checkpoints infrequent. NOTE: Claude Code's in-session `!`
-shell is sandboxed (output lands in the chat) — it also can't see the venv; use a real Terminal.
+**The agent runs the suite itself** — `~/.venvs/text-triage/bin/python -m pytest -q` (~1s). A global
+`allow` rule (`Bash(~/.venvs/*/bin/python -m pytest:*)` in `~/.claude/settings.json`) permits it, and
+the agent's Bash tool reaches the external venv fine. Do the real TDD loop: write the failing test,
+run it RED, implement, run it GREEN. (The old "agent can't run tests" claim was a misread — iCloud had
+*evicted* the repo-local `.venv` files, so "No such file or directory" was literally true; it was
+never a sandbox wall. The external `~/.venvs` venv was always reachable.)
 
 **Dead ends — do not retry** (each fails or just band-aids the symptom): a project-local `.venv`
 (iCloud eats it), uv in any form (`uv sync`/`uv run`/`UV_LINK_MODE=copy`/`--reinstall`),

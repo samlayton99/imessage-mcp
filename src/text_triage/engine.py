@@ -1,39 +1,41 @@
-"""The model-call seam (PLAN "engine.py"): one interface, two-plus backends.
+"""The model-call seam (PLAN "Engine"): one async interface, two real backends.
 
-``Engine.summarize(prompt, *, model) -> str`` returns the model's raw text. ``summarize.py`` owns
-prompt assembly and schema validation; the engine only runs the model. This keeps the whole
-summarizer testable with a :class:`StubEngine` (no LLM, no network) and makes the backend a
-``conditions.yaml`` choice (``engine.provider``).
+``await Engine.summarize(prompt, *, model) -> str`` returns the model's raw text. ``summarize.py``
+owns prompt assembly + schema validation; the engine only runs the model. The whole summarizer stays
+testable with a :class:`StubEngine` (no LLM, no network), and the backend is a ``conditions.yaml``
+choice (``engine.provider``):
 
-Step 0 ships ``claude_code`` (headless ``claude -p --output-format json``, authed by a long-lived
-OAuth token on the host). The ``api_key`` Anthropic-SDK backend is a later thin adapter behind this
-same interface.
+* ``litellm`` (default) — any provider via API key (incl. the Claude API), through the battle-tested
+  ``litellm`` unifier. Pay-per-use; keys come from the environment (``.env``).
+* ``agent_sdk`` — Anthropic only, on a Claude **Max** plan's credit, via ``claude_agent_sdk`` (no API
+  key; auth is the logged-in Claude session).
+
+Both deps are imported lazily, so importing this module needs neither installed; tests inject fakes.
+Everything is async; ``summarize.py`` fans out per-conversation calls in parallel.
 """
 from __future__ import annotations
 
-import json
-import subprocess
 from typing import Callable, List, Optional, Protocol, Tuple, Union, runtime_checkable
 
 from text_triage.config import Config
 
-__all__ = ["Engine", "StubEngine", "ClaudeCodeEngine", "EngineError", "make_engine"]
+__all__ = ["Engine", "StubEngine", "LiteLLMEngine", "AgentSdkEngine", "EngineError", "make_engine"]
 
 
 class EngineError(RuntimeError):
-    """The backend ran but did not return a usable result (non-zero exit, error envelope)."""
+    """The backend ran but did not return a usable result."""
 
 
 @runtime_checkable
 class Engine(Protocol):
-    def summarize(self, prompt: str, *, model: str) -> str:
+    async def summarize(self, prompt: str, *, model: str) -> str:
         """Run ``model`` on ``prompt`` and return its raw text output."""
         ...
 
 
 class StubEngine:
-    """A deterministic test engine. ``responses`` is either a single string returned for every
-    call, or a list consumed in order (an item that is an Exception is raised). Records every
+    """A deterministic test engine. ``responses`` is either a single string returned for every call,
+    or a list consumed in order (an item that is an Exception is raised). Records every
     ``(prompt, model)`` in :attr:`calls`."""
 
     def __init__(self, responses: Union[str, List[object]]):
@@ -41,7 +43,7 @@ class StubEngine:
         self._queue = None if isinstance(responses, str) else list(responses)
         self.calls: List[Tuple[str, str]] = []
 
-    def summarize(self, prompt: str, *, model: str) -> str:
+    async def summarize(self, prompt: str, *, model: str) -> str:
         self.calls.append((prompt, model))
         if self._const is not None:
             return self._const
@@ -53,42 +55,68 @@ class StubEngine:
         return item
 
 
-class ClaudeCodeEngine:
-    """Headless Claude Code backend: ``claude -p <prompt> --output-format json --model <model>``.
+class LiteLLMEngine:
+    """Any-provider backend via ``litellm.acompletion`` (OpenAI-style messages; works with the Claude
+    API, OpenAI, Gemini, local, …). ``acompletion`` is injectable for tests; the default lazy-imports
+    it. ``model`` is the litellm ``<provider>/<model>`` string from ``engine.models``."""
 
-    ``run`` (injected for tests) takes the argv list and returns the process stdout; the default
-    shells out via :mod:`subprocess`. The JSON envelope's ``result`` field is the model's text."""
+    def __init__(self, *, acompletion: Optional[Callable] = None, max_tokens: int = 1024,
+                 num_retries: int = 2):
+        self._acompletion = acompletion
+        self._max_tokens = max_tokens
+        self._num_retries = num_retries
 
-    def __init__(self, run: Optional[Callable[[List[str]], str]] = None):
-        self._run = run or _default_run
-
-    def summarize(self, prompt: str, *, model: str) -> str:
-        argv = ["claude", "-p", prompt, "--output-format", "json", "--model", model]
-        try:
-            stdout = self._run(argv)
-        except subprocess.CalledProcessError as e:
-            raise EngineError(f"claude -p exited {e.returncode}: {e.stderr}") from e
-        try:
-            env = json.loads(stdout)
-        except json.JSONDecodeError as e:
-            raise EngineError(f"claude -p returned non-JSON: {stdout[:200]!r}") from e
-        if env.get("is_error") or env.get("subtype") not in (None, "success"):
-            raise EngineError(f"claude -p error envelope: {env.get('subtype')!r}")
-        return env.get("result", "")
-
-
-def _default_run(argv: List[str]) -> str:
-    proc = subprocess.run(argv, capture_output=True, text=True, check=True)
-    return proc.stdout
-
-
-def make_engine(config: Config, *, run: Optional[Callable[[List[str]], str]] = None) -> Engine:
-    """Build the engine named by ``config.engine.provider``."""
-    provider = config.engine.provider
-    if provider == "claude_code":
-        return ClaudeCodeEngine(run=run)
-    if provider == "api_key":
-        raise NotImplementedError(
-            "engine.provider 'api_key' is a later step; use 'claude_code' for now"
+    async def summarize(self, prompt: str, *, model: str) -> str:
+        acompletion = self._acompletion
+        if acompletion is None:
+            try:
+                import litellm
+            except ImportError as e:
+                raise EngineError("engine.provider 'litellm' needs `pip install litellm`") from e
+            acompletion = litellm.acompletion
+        resp = await acompletion(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=self._max_tokens,
+            num_retries=self._num_retries,
         )
+        try:
+            return resp.choices[0].message.content
+        except (AttributeError, IndexError, KeyError, TypeError) as e:
+            raise EngineError(f"litellm returned an unexpected response shape: {resp!r}") from e
+
+
+class AgentSdkEngine:
+    """Anthropic-Max backend via ``claude_agent_sdk`` — a single tool-less turn billed to the Claude
+    subscription's Agent-SDK credit (no API key; auth is the logged-in session). Lazy-imported."""
+
+    def __init__(self, *, max_turns: int = 1):
+        self._max_turns = max_turns
+
+    async def summarize(self, prompt: str, *, model: str) -> str:
+        # VERIFY: option flags + message/text extraction against the installed claude_agent_sdk.
+        try:
+            from claude_agent_sdk import ClaudeAgentOptions, query
+        except ImportError as e:
+            raise EngineError("engine.provider 'agent_sdk' needs `pip install claude-agent-sdk`") from e
+        options = ClaudeAgentOptions(model=model, allowed_tools=[], max_turns=self._max_turns)
+        parts: List[str] = []
+        async for message in query(prompt=prompt, options=options):
+            for block in getattr(message, "content", None) or []:
+                text = getattr(block, "text", None)
+                if isinstance(text, str):
+                    parts.append(text)
+        out = "".join(parts).strip()
+        if not out:
+            raise EngineError("agent_sdk returned no text")
+        return out
+
+
+def make_engine(config: Config, *, acompletion: Optional[Callable] = None) -> Engine:
+    """Build the engine named by ``config.engine.provider`` (``litellm`` default | ``agent_sdk``)."""
+    provider = config.engine.provider
+    if provider == "litellm":
+        return LiteLLMEngine(acompletion=acompletion)
+    if provider == "agent_sdk":
+        return AgentSdkEngine()
     raise NotImplementedError(f"unknown engine.provider {provider!r}")

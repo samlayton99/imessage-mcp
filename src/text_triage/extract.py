@@ -186,9 +186,9 @@ def load_contacts(addressbook_dir=ADDRESSBOOK_DIR):
 def window_days_for(window, config):
     """Resolve a named window to its day count from config (``weekly``/``monthly``)."""
     if window == "weekly":
-        return config.windows.weekly_days
+        return config.messages.weekly_days
     if window == "monthly":
-        return config.windows.monthly_days
+        return config.messages.monthly_days
     raise ValueError(f"unknown window {window!r}; expected 'weekly' or 'monthly'")
 
 
@@ -233,8 +233,8 @@ def extract(*, db_path=CHAT_DB, addressbook_dir=ADDRESSBOOK_DIR, window=None, si
     if now is None:
         now = datetime.datetime.now().timestamp()
 
-    cf = config.conversation_filter
-    context_messages = config.windows.context_messages
+    cf = config.messages
+    context_messages = config.messages.context_messages
 
     con = connect_ro(db_path)
     cur = con.cursor()
@@ -247,7 +247,7 @@ def extract(*, db_path=CHAT_DB, addressbook_dir=ADDRESSBOOK_DIR, window=None, si
         unix = db_date / units_per_sec + MAC_EPOCH_OFFSET
         return datetime.datetime.fromtimestamp(unix).strftime("%Y-%m-%d %H:%M:%S")
 
-    lookback_days = config.windows.unresponded_lookback_days
+    lookback_days = config.messages.unresponded_lookback_days
     cutoff_lookback_db = int((now - lookback_days * 86400 - MAC_EPOCH_OFFSET) * units_per_sec)
     if window is not None:
         window_days = window_days_for(window, config)

@@ -19,6 +19,7 @@ bad LLM return never corrupts the batch. Prompts live in ``agents/<mode>.md`` (f
 """
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
 import logging
@@ -224,15 +225,15 @@ def _validate_record(rec: dict, *, law_slugs: set) -> Conversation:
     return Conversation.model_validate(rec, context={"law": law_slugs})
 
 
-def _run_one(mode, skel, raw, prev, *, engine, config, law, law_slugs, generated_at, note_date,
-             now_str, agents_dir) -> Conversation:
+async def _run_one(mode, skel, raw, prev, *, engine, config, law, law_slugs, generated_at, note_date,
+                   now_str, agents_dir) -> Conversation:
     builder = _BUILDERS[mode]
-    model = getattr(config.models, mode)
+    model = getattr(config.engine.models, mode)
     prompt = builder(skel, raw, prev=prev, law=law, agents_dir=agents_dir)
     last_err: Optional[Exception] = None
     for _ in range(2):
         try:
-            text = engine.summarize(prompt, model=model)
+            text = await engine.summarize(prompt, model=model)
             llm = _parse_json(text)
             rec = _apply(mode, skel, prev, llm, law_slugs=law_slugs, generated_at=generated_at,
                          note_date=note_date, now_str=now_str)
@@ -247,10 +248,10 @@ def _run_one(mode, skel, raw, prev, *, engine, config, law, law_slugs, generated
 
 
 # --------------------------------------------------------------------------- the agents
-def _summarize(mode: str, export: dict, *, engine: Engine, config: Optional[Config] = None,
-               prev_state: Optional[Union[State, dict]] = None, law: Optional[dict] = None,
-               generated_at: Optional[str] = None, limit: Optional[int] = None,
-               agents_dir=None) -> State:
+async def _summarize(mode: str, export: dict, *, engine: Engine, config: Optional[Config] = None,
+                     prev_state: Optional[Union[State, dict]] = None, law: Optional[dict] = None,
+                     generated_at: Optional[str] = None, limit: Optional[int] = None,
+                     agents_dir=None) -> State:
     if config is None:
         config = Config()
     if law is None:
@@ -265,19 +266,28 @@ def _summarize(mode: str, export: dict, *, engine: Engine, config: Optional[Conf
     prev_dict = prev_state.model_dump() if isinstance(prev_state, State) else (prev_state or {})
     prev_by_id = {c["chat_rowid"]: c for c in prev_dict.get("conversations", [])}
 
-    out, seen = [], set()
-    for idx, skel in enumerate(sk["conversations"]):
+    # Fan out one task per chat_rowid (a partition: two LLMs never touch the same conversation),
+    # bounded by a semaphore. Each task is pure — it returns a record, mutates no shared state — and
+    # gather preserves order, so out[] matches conversation order. The single write happens in the
+    # caller, after all tasks finish (no concurrent writers). StubEngine list-mode assumes sequential
+    # consumption; the suite issues <=1 concurrent call, so it stays deterministic.
+    sem = asyncio.Semaphore(config.engine.max_concurrency)
+
+    async def _slot(idx, skel):
         cid = skel["chat_rowid"]
         if limit is not None and idx >= limit:                  # cost cap: no LLM call beyond limit
             prev = prev_by_id.get(cid)
-            out.append(prev if prev else dict(skel))
-            seen.add(cid)
-            continue
-        rec = _run_one(mode, skel, raw_by_id.get(cid, []), prev_by_id.get(cid), engine=engine,
-                       config=config, law=law, law_slugs=law_slugs, generated_at=generated_at,
-                       note_date=note_date, now_str=now_str, agents_dir=agents_dir)
-        out.append(rec.model_dump())
-        seen.add(cid)
+            return (prev if prev else dict(skel)), cid
+        async with sem:
+            rec = await _run_one(mode, skel, raw_by_id.get(cid, []), prev_by_id.get(cid),
+                                 engine=engine, config=config, law=law, law_slugs=law_slugs,
+                                 generated_at=generated_at, note_date=note_date, now_str=now_str,
+                                 agents_dir=agents_dir)
+        return rec.model_dump(), cid
+
+    slots = await asyncio.gather(*(_slot(i, s) for i, s in enumerate(sk["conversations"])))
+    out = [rec for rec, _ in slots]
+    seen = {cid for _, cid in slots}
 
     for cid, prec in prev_by_id.items():                        # carry forward idle conversations
         if cid not in seen:
@@ -305,15 +315,15 @@ def _max_watermark(new: dict, prev: Optional[dict]) -> dict:
 
 
 def summarize_daily(export, **kw) -> State:
-    return _summarize("daily", export, **kw)
+    return asyncio.run(_summarize("daily", export, **kw))
 
 
 def summarize_weekly(export, **kw) -> State:
-    return _summarize("weekly", export, **kw)
+    return asyncio.run(_summarize("weekly", export, **kw))
 
 
 def summarize_monthly(export, **kw) -> State:
-    return _summarize("monthly", export, **kw)
+    return asyncio.run(_summarize("monthly", export, **kw))
 
 
 # --------------------------------------------------------------------------------- CLI

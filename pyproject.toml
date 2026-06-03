@@ -8,7 +8,13 @@ requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.6",
     "pyyaml>=6.0.3",
+    "python-dotenv>=1.0",
 ]
+
+[project.optional-dependencies]
+# Pick the backend you use (engine.provider). Both are imported lazily; the test suite needs neither.
+litellm = ["litellm>=1.40"]        # provider: litellm — any model via API key (incl. the Claude API)
+agent-sdk = ["claude-agent-sdk"]   # provider: agent_sdk — Anthropic on a Claude Max plan
 
 [project.scripts]
 text-triage = "text_triage.cli:main"

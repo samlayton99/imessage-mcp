@@ -1,63 +1,70 @@
-"""The model-call seam. One interface, ``summarize(prompt, *, model) -> str`` (PLAN "engine.py").
-Step 0 ships the ``claude_code`` backend (headless ``claude -p``) plus a ``StubEngine`` so the
-summarizer's logic is fully testable with no LLM, no network. The ``api_key`` SDK backend is a
-later, thin same-interface adapter."""
-import json
+"""The model-call seam: one async interface, ``await summarize(prompt, *, model) -> str``. Backends
+are ``litellm`` (any provider via API key) and ``agent_sdk`` (Anthropic Max), both lazy-imported; a
+``StubEngine`` keeps the summarizer fully testable with no LLM and no network."""
+import asyncio
+from types import SimpleNamespace
 
 import pytest
 
 from text_triage.config import Config
-from text_triage.engine import ClaudeCodeEngine, EngineError, StubEngine, make_engine
+from text_triage.engine import AgentSdkEngine, EngineError, LiteLLMEngine, StubEngine, make_engine
 
 
+# ----------------------------------------------------------------- StubEngine
 def test_stub_returns_sequence_and_records_calls():
-    e = StubEngine(['{"summary":"a"}', '{"summary":"b"}'])
-    assert e.summarize("p1", model="m1") == '{"summary":"a"}'
-    assert e.summarize("p2", model="m2") == '{"summary":"b"}'
+    e = StubEngine(['{"a":1}', '{"b":2}'])
+    assert asyncio.run(e.summarize("p1", model="m1")) == '{"a":1}'
+    assert asyncio.run(e.summarize("p2", model="m2")) == '{"b":2}'
     assert e.calls == [("p1", "m1"), ("p2", "m2")]
 
 
 def test_stub_constant_string_repeats():
     e = StubEngine("X")
-    assert e.summarize("a", model="m") == "X"
-    assert e.summarize("b", model="m") == "X"
+    assert asyncio.run(e.summarize("a", model="m")) == "X"
+    assert asyncio.run(e.summarize("b", model="m")) == "X"
 
 
 def test_stub_raises_an_exception_response():
     e = StubEngine([RuntimeError("boom")])
     with pytest.raises(RuntimeError):
-        e.summarize("p", model="m")
+        asyncio.run(e.summarize("p", model="m"))
 
 
-def test_claude_code_builds_argv_and_parses_result():
+def test_stub_out_of_responses_raises_engine_error():
+    e = StubEngine([])
+    with pytest.raises(EngineError):
+        asyncio.run(e.summarize("p", model="m"))
+
+
+# ----------------------------------------------------------------- LiteLLMEngine
+def test_litellm_forwards_prompt_and_model_and_returns_text():
     seen = {}
 
-    def fake_run(argv):
-        seen["argv"] = argv
-        return json.dumps({"type": "result", "subtype": "success",
-                           "result": "HELLO", "total_cost_usd": 0.01})
+    async def fake_acompletion(**kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="HELLO"))])
 
-    out = ClaudeCodeEngine(run=fake_run).summarize("do it", model="claude-opus-4-8")
+    eng = LiteLLMEngine(acompletion=fake_acompletion)
+    out = asyncio.run(eng.summarize("do it", model="anthropic/claude-x"))
     assert out == "HELLO"
-    argv = seen["argv"]
-    assert argv[0] == "claude" and "-p" in argv and "do it" in argv
-    assert "--model" in argv and "claude-opus-4-8" in argv
-    assert "--output-format" in argv and "json" in argv
+    assert seen["model"] == "anthropic/claude-x"
+    assert seen["messages"] == [{"role": "user", "content": "do it"}]
 
 
-def test_claude_code_raises_on_error_envelope():
-    def fake_run(argv):
-        return json.dumps({"type": "result", "subtype": "error_during_execution",
-                           "is_error": True, "result": ""})
+def test_litellm_bad_response_shape_raises_engine_error():
+    async def fake_acompletion(**kwargs):
+        return SimpleNamespace(choices=[])  # malformed: no message
 
+    eng = LiteLLMEngine(acompletion=fake_acompletion)
     with pytest.raises(EngineError):
-        ClaudeCodeEngine(run=fake_run).summarize("x", model="m")
+        asyncio.run(eng.summarize("x", model="m"))
 
 
-def test_make_engine_claude_code_default():
-    assert isinstance(make_engine(Config()), ClaudeCodeEngine)
+# ----------------------------------------------------------------- make_engine
+def test_make_engine_litellm_is_the_default():
+    assert isinstance(make_engine(Config()), LiteLLMEngine)
 
 
-def test_make_engine_api_key_not_yet():
-    with pytest.raises(NotImplementedError):
-        make_engine(Config(engine={"provider": "api_key"}))
+def test_make_engine_agent_sdk():
+    eng = make_engine(Config(engine={"provider": "agent_sdk"}))
+    assert isinstance(eng, AgentSdkEngine)

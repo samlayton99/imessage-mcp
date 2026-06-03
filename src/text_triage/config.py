@@ -25,30 +25,50 @@ class _CBase(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class Windows(_CBase):
+# ── 1. text-message rules ─ what gets read & summarized ──────────────────────
+class Messages(_CBase):
+    """Extract windows + the conversation filter (one flat 'what to read' surface)."""
     weekly_days: int = Field(default=7, ge=1)
     monthly_days: int = Field(default=30, ge=1)
+    # EXTRACTION lead-in: older msgs pulled in just before a window (NOT an LLM-input cap; see RawCaps).
     context_messages: int = Field(default=10, ge=0)
-    raw_store_days: int = Field(default=30, ge=0)  # 0 = keep raw forever (no pruning on the VPS)
     unresponded_lookback_days: int = Field(default=90, ge=1)
-
-
-class ConversationFilter(_CBase):
     include_groups: bool = True
     named_only: bool = False
     min_handle_digits: int = Field(default=10, ge=0)
     min_messages: int = Field(default=1, ge=0)
 
 
+# ── 2. models & billing ─ who runs each summary, and how you pay ─────────────
 class ModelRoles(_CBase):
-    daily: str = "claude-sonnet-4-6"
-    weekly: str = "claude-sonnet-4-6"
-    monthly: str = "claude-opus-4-8"
-    curator: str = "claude-sonnet-4-6"
+    daily: str = "anthropic/claude-sonnet-4-6"
+    weekly: str = "anthropic/claude-opus-4-8"
+    monthly: str = "anthropic/claude-opus-4-8"
+    curator: str = "anthropic/claude-opus-4-8"
+
+
+class RawCaps(_CBase):
+    """LLM-INPUT cap: most raw msgs from a window packed into one summary call, per cadence; 0 = no cap.
+    Distinct from Messages.context_messages (extraction lead-in) and Vps.raw_store_days (server retention)."""
+    daily: int = Field(default=0, ge=0)
+    weekly: int = Field(default=0, ge=0)
+    monthly: int = Field(default=0, ge=0)
 
 
 class Engine(_CBase):
-    provider: Literal["claude_code", "api_key"] = "claude_code"
+    # litellm = any provider via API key (incl. the Claude API); agent_sdk = Anthropic on a Claude Max plan.
+    provider: Literal["litellm", "agent_sdk"] = "litellm"
+    max_concurrency: int = Field(default=8, ge=1)
+    models: ModelRoles = Field(default_factory=ModelRoles)
+    max_raw_messages: RawCaps = Field(default_factory=RawCaps)
+
+
+# ── 3. VPS ─ owns & serves state.json (mostly wired later) ───────────────────
+class Schedule(_CBase):
+    timezone: str = "auto"  # auto = the Mac's system timezone
+    daily: list[str] = ["on_open", "21:00"]
+    weekly: list[str] = ["mon 03:00"]
+    monthly: list[str] = ["1 03:00"]
 
 
 class Live(_CBase):
@@ -56,25 +76,17 @@ class Live(_CBase):
     interval_seconds: int = Field(default=30, ge=1)
 
 
-class Schedule(_CBase):
-    timezone: str = "auto"  # auto = the Mac's system timezone
-    daily: list[str] = ["on_open", "21:00"]
-    weekly: list[str] = ["mon 04:00"]
-    monthly: list[str] = ["1 04:00"]
-
-
-class Tags(_CBase):
-    auto_apply: bool = True
+class Vps(_CBase):
+    url: str = ""                                  # blank = run locally
+    raw_store_days: int = Field(default=0, ge=0)   # SERVER RETENTION: how long raw text is kept on the VPS; 0 = forever
+    schedule: Schedule = Field(default_factory=Schedule)
+    live: Live = Field(default_factory=Live)
 
 
 class Config(_CBase):
-    windows: Windows = Field(default_factory=Windows)
-    conversation_filter: ConversationFilter = Field(default_factory=ConversationFilter)
-    models: ModelRoles = Field(default_factory=ModelRoles)
+    messages: Messages = Field(default_factory=Messages)
     engine: Engine = Field(default_factory=Engine)
-    live: Live = Field(default_factory=Live)
-    schedule: Schedule = Field(default_factory=Schedule)
-    tags: Tags = Field(default_factory=Tags)
+    vps: Vps = Field(default_factory=Vps)
 
 
 def _discover_path(explicit: Optional[Union[str, Path]]) -> Optional[Path]:

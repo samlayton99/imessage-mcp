@@ -5,7 +5,7 @@ Disk Access / real data is required."""
 import datetime
 import json
 
-from text_triage.config import Config, ConversationFilter
+from text_triage.config import Config, Messages
 from text_triage.extract import (
     MAC_EPOCH_OFFSET,
     compute_watermark,
@@ -38,7 +38,7 @@ def _one_to_one(handle="+15550000001", messages=None, identifier=None):
 def test_window_days_for_reads_config():
     assert window_days_for("weekly", Config()) == 7
     assert window_days_for("monthly", Config()) == 30
-    custom = Config.model_validate({"windows": {"weekly_days": 14, "monthly_days": 60}})
+    custom = Config.model_validate({"messages": {"weekly_days": 14, "monthly_days": 60}})
     assert window_days_for("weekly", custom) == 14
     assert window_days_for("monthly", custom) == 60
 
@@ -200,7 +200,7 @@ def test_tapback_is_labeled(tmp_path, chatdb_factory):
 
 # -------------------------------------------------- conversation_filter (from config)
 def _cfg(**kw):
-    return Config(conversation_filter=ConversationFilter(**kw))
+    return Config(messages=Messages(**kw))
 
 
 def test_filter_excludes_groups_when_disabled(tmp_path, chatdb_factory):
