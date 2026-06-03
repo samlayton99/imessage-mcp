@@ -249,8 +249,11 @@ def test_unresponded_excludes_shortcode(tmp_path, chatdb_factory):
 def test_main_writes_out_file(tmp_path, chatdb_factory):
     conv = _one_to_one(messages=[{"date": dbdate(1), "from_me": False, "handle": "+15550000001", "text": "hi"}])
     db, ab, out = tmp_path / "chat.db", tmp_path / "ab", tmp_path / "export.json"
+    cfg = tmp_path / "conditions.yaml"
+    cfg.write_text("{}\n")  # empty mapping = defaults; keeps this test hermetic from the repo's config
     chatdb_factory(db, [conv])
-    rc = main(["--window", "monthly", "--db", str(db), "--addressbook", str(ab), "--out", str(out)])
+    rc = main(["--window", "monthly", "--db", str(db), "--addressbook", str(ab),
+               "--out", str(out), "--config", str(cfg)])
     assert rc == 0
     data = json.loads(out.read_text())
     assert data["window"] == "monthly"

@@ -5,16 +5,16 @@ windows:
   monthly_days: 30          # `--window monthly` extracts this many days (sets the weekly-note cap); e.g. 60 for a longer horizon
   context_messages: 10      # raw msgs before the window for context; 0 = none
   unresponded_lookback_days: 90  # how far back a 1:1 counts as a stale "owe a reply" (band: [window, lookback))
-  raw_store_days: 30        # raw-text window kept on the VPS deep-dive cache; 0 = keep forever (no pruning).
+  raw_store_days: 0        # raw-text window kept on the VPS deep-dive cache; 0 = keep forever (no pruning).
                             # Not your archive: chat.db (Mac) + summaries/history (state.json) are permanent.
 conversation_filter:
   include_groups: true
   named_only: false         # true = only address-book contacts
   min_handle_digits: 10     # drop shortcodes / sub-10-digit senders (e.g. '38792')
-  min_messages: 1
+  min_messages: 2
 models:                     # which model plays which role — fully customizable
   daily: claude-sonnet-4-6
-  weekly: claude-sonnet-4-6
+  weekly: claude-opus-4-8
   monthly: claude-opus-4-8
   curator: claude-opus-4-8
 engine:
@@ -25,7 +25,7 @@ live:
 schedule:                   # when the VPS runs LLM summaries (local tz); raw updates live regardless
   timezone: auto            # auto = use the Mac's system timezone; set explicitly (e.g. America/Los_Angeles) to override
   daily:   ["on_open", "21:00"]
-  weekly:  ["mon 04:00"]
-  monthly: ["1 04:00"]
+  weekly:  ["mon 03:00"]
+  monthly: ["1 03:00"]
 tags:
   auto_apply: true

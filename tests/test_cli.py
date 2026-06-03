@@ -17,9 +17,11 @@ def test_dispatches_extract_subcommand(tmp_path, chatdb_factory):
     db = tmp_path / "chat.db"
     ab = tmp_path / "ab"
     out = tmp_path / "export.json"
+    cfg = tmp_path / "conditions.yaml"
+    cfg.write_text("{}\n")  # hermetic: don't pick up the repo's conditions.yaml
     chatdb_factory(db, [conv])
     rc = cli.main(["extract", "--window", "monthly", "--db", str(db), "--addressbook", str(ab),
-                   "--out", str(out)])
+                   "--out", str(out), "--config", str(cfg)])
     assert rc == 0
     assert json.loads(out.read_text())["window"] == "monthly"
 
