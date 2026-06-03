@@ -4,12 +4,14 @@ The validated record IS the product (PLAN "Non-negotiables"): every conversation
 (shape AND cross-field rules) on write and on MCP read, so consumers trust it blindly. The LLM
 enriches prose fields; code owns correctness. Invalid records must never land.
 
-Cross-field rules enforced here (PLAN "Hardening"):
+Cross-field rules enforced here (PLAN "Hardening", as amended):
   - is_group => non-empty ``members`` and no ``handle``; else ``handle`` and no ``members``
-  - ``identity`` <= 3 sentences; ``daily`` <= 7; ``weekly`` <= 5; ``history`` entries dated
-  - ``tags`` subset of the active∪retired law (enforced only when a law is supplied via context)
-  - ``needs_reply`` => non-empty ``reply_reason`` — scoped to *summarized* records (``summary`` set),
-    so deterministic skeleton records (``summary is None``) may carry ``needs_reply`` with no reason.
+  - ``identity`` <= 3 sentences; ``history`` / ``daily`` entries dated
+  - ``tags`` subset of the law slugs (enforced only when a law is supplied via context)
+
+There is no rolling ``summary`` and no ``daily``/``weekly`` array caps (memory is the layered notes
+``identity`` + ``daily``/``weekly``/``monthly``/``history``; the cascade clears the lists). The live
+raw layer ``texts_today`` lives ON each conversation record, not at the top level.
 """
 from __future__ import annotations
 
@@ -33,21 +35,12 @@ __all__ = [
     "DatedNote",
     "WeeklyNote",
     "TodayMessage",
-    "TextsTodayConversation",
-    "TextsToday",
     "Conversation",
     "State",
     "validate_state",
     "is_valid_state",
     "ValidationError",
 ]
-
-
-# Default note-array caps when no config is supplied. In production these are DERIVED from the
-# windows in conditions.yaml (daily_cap = weekly_days; weekly_cap = ceil(monthly_days / 7)) and
-# injected via validation context, so a cadence change can never conflict with the type contract.
-DEFAULT_DAILY_CAP = 7
-DEFAULT_WEEKLY_CAP = 5
 
 
 class _Base(BaseModel):
@@ -93,23 +86,12 @@ class WeeklyNote(_Base):
 
 
 class TodayMessage(_Base):
+    """One raw, unsummarized message in a conversation's live ``texts_today`` layer."""
+
     message_rowid: int
     datetime: str
     sender: str
     text: str
-
-
-class TextsTodayConversation(_Base):
-    name: str
-    messages: list[TodayMessage] = []
-
-
-class TextsToday(_Base):
-    """The live layer: raw unsummarized messages pushed from the Mac, keyed by ``chat_rowid``
-    (as str). Empty in a deterministic skeleton; populated by ingest in a later step."""
-
-    since: Optional[str] = None
-    conversations: dict[str, TextsTodayConversation] = {}
 
 
 class Conversation(_Base):
@@ -124,10 +106,10 @@ class Conversation(_Base):
     last_message_at: str
     last_updated: Optional[str] = None
     needs_reply: bool = False
-    # --- LLM-authored (blank in a skeleton record) ---
+    # --- live raw layer (code-owned; watcher pushes, the daily agent reads then clears) ---
+    texts_today: list[TodayMessage] = []
+    # --- agent-authored (blank in a skeleton record) ---
     identity: Optional[str] = None
-    summary: Optional[str] = None
-    reply_reason: Optional[str] = None
     tags: list[str] = []
     daily: list[DatedNote] = []
     weekly: list[WeeklyNote] = []
@@ -145,24 +127,6 @@ class Conversation(_Base):
             raise ValueError(f"identity must be <= 3 sentences, got {len(sentences)}")
         return v
 
-    @field_validator("daily")
-    @classmethod
-    def _daily_cap(cls, v: list, info: ValidationInfo) -> list:
-        cap = (info.context or {}).get("daily_cap") if info.context else None
-        cap = DEFAULT_DAILY_CAP if cap is None else cap
-        if len(v) > cap:
-            raise ValueError(f"daily capped at {cap}, got {len(v)}")
-        return v
-
-    @field_validator("weekly")
-    @classmethod
-    def _weekly_cap(cls, v: list, info: ValidationInfo) -> list:
-        cap = (info.context or {}).get("weekly_cap") if info.context else None
-        cap = DEFAULT_WEEKLY_CAP if cap is None else cap
-        if len(v) > cap:
-            raise ValueError(f"weekly capped at {cap}, got {len(v)}")
-        return v
-
     @field_validator("tags")
     @classmethod
     def _tags_subset_of_law(cls, v: list[str], info: ValidationInfo) -> list[str]:
@@ -170,7 +134,7 @@ class Conversation(_Base):
         if law is not None:
             extra = set(v) - set(law)
             if extra:
-                raise ValueError(f"tags not in active∪retired law: {sorted(extra)}")
+                raise ValueError(f"tags not in the law: {sorted(extra)}")
         return v
 
     @model_validator(mode="after")
@@ -187,49 +151,24 @@ class Conversation(_Base):
                 raise ValueError("1:1 conversation must not have members")
         return self
 
-    @model_validator(mode="after")
-    def _needs_reply_requires_reason(self) -> "Conversation":
-        # Scoped to summarized records: a skeleton (summary is None) may carry needs_reply
-        # without a reason; once the LLM writes a summary, a needs_reply must justify itself.
-        if self.summary is not None and self.needs_reply:
-            if not (self.reply_reason and self.reply_reason.strip()):
-                raise ValueError("summarized needs_reply record requires a non-empty reply_reason")
-        return self
-
 
 class State(_Base):
     generated_at: str
     watermark: Watermark
     unresponded: list[Unresponded] = []
-    texts_today: TextsToday = Field(default_factory=TextsToday)
     conversations: list[Conversation] = []
 
 
-def validate_state(
-    data: dict,
-    *,
-    law: Optional[set[str]] = None,
-    daily_cap: Optional[int] = None,
-    weekly_cap: Optional[int] = None,
-) -> State:
-    """Validate a ``state.json`` dict into a :class:`State`. Raises ``ValidationError`` on any
-    shape or cross-field violation. Pass ``law`` (active∪retired tag slugs) to enforce
-    ``tags ⊆ law``; pass ``daily_cap``/``weekly_cap`` (from ``config.Config``) to override the
-    default note-array caps. Omitted values fall back to the built-in defaults."""
-    return State.model_validate(
-        data, context={"law": law, "daily_cap": daily_cap, "weekly_cap": weekly_cap}
-    )
+def validate_state(data: dict, *, law: Optional[set[str]] = None) -> State:
+    """Validate a ``state.json`` dict into a :class:`State`. Raises ``ValidationError`` on any shape
+    or cross-field violation. Pass ``law`` (the active tag slugs) to enforce ``tags ⊆ law``; omit it
+    and tags are unchecked."""
+    return State.model_validate(data, context={"law": law})
 
 
-def is_valid_state(
-    data: dict,
-    *,
-    law: Optional[set[str]] = None,
-    daily_cap: Optional[int] = None,
-    weekly_cap: Optional[int] = None,
-) -> bool:
+def is_valid_state(data: dict, *, law: Optional[set[str]] = None) -> bool:
     try:
-        validate_state(data, law=law, daily_cap=daily_cap, weekly_cap=weekly_cap)
+        validate_state(data, law=law)
         return True
     except ValidationError:
         return False

@@ -31,19 +31,17 @@ def write_state(
     path: Union[str, Path],
     *,
     law: Optional[set[str]] = None,
-    daily_cap: Optional[int] = None,
-    weekly_cap: Optional[int] = None,
 ) -> None:
     """Validate ``state`` and atomically write it to ``path``.
 
-    ``state`` may be a :class:`State` or a raw dict; either is re-validated (with ``law`` and the
-    config-derived note caps, if given) so the tag-law and every cross-field rule are enforced at
-    write time. On success the file at ``path`` is replaced atomically; on any failure the previous
-    file (if any) is untouched and no temp file is left behind.
+    ``state`` may be a :class:`State` or a raw dict; either is re-validated (with ``law``, if given)
+    so the tag-law and every cross-field rule are enforced at write time. On success the file at
+    ``path`` is replaced atomically; on any failure the previous file (if any) is untouched and no
+    temp file is left behind.
     """
     path = Path(path)
     data = state.model_dump() if isinstance(state, State) else state
-    validated = validate_state(data, law=law, daily_cap=daily_cap, weekly_cap=weekly_cap)
+    validated = validate_state(data, law=law)
     text = validated.model_dump_json(indent=2)
 
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
@@ -61,20 +59,14 @@ def write_state(
         raise
 
 
-def read_state(
-    path: Union[str, Path],
-    *,
-    law: Optional[set[str]] = None,
-    daily_cap: Optional[int] = None,
-    weekly_cap: Optional[int] = None,
-) -> State:
+def read_state(path: Union[str, Path], *, law: Optional[set[str]] = None) -> State:
     """Load and validate ``state.json`` (validate-on-read). Raises on a corrupt/invalid file."""
     path = Path(path)
     import json
 
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    return validate_state(data, law=law, daily_cap=daily_cap, weekly_cap=weekly_cap)
+    return validate_state(data, law=law)
 
 
 @contextmanager

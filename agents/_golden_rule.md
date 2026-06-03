@@ -1,0 +1,3 @@
+GOLDEN RULE — never assume; record only what you actually know.
+
+State only what the messages establish, and no more. If the evidence supports a general fact but not a specific one, write the general fact and stop there: when the texts show someone works in healthcare but not their exact role, write "works in healthcare," not "is a physical therapist." Do not infer anyone's exact job, relationship, location, beliefs, or intentions from weak or indirect signals. Prefer "unknown" or a lower-specificity, hedged statement over a confident guess, and only sharpen a detail once the messages make it certain. Never invent, extrapolate, or fill gaps. An accurate, humble note always beats a precise but wrong one.

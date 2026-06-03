@@ -47,9 +47,15 @@ def test_full_state_round_trips():
 
 def test_skeleton_leaves_llm_fields_empty_by_default():
     c = Conversation.model_validate(valid_conv())
-    assert c.identity is None and c.summary is None and c.reply_reason is None
+    assert c.identity is None and c.texts_today == []
     assert c.tags == [] and c.daily == [] and c.weekly == [] and c.history == []
     assert c.monthly is None and c.edited == {}
+
+
+def test_texts_today_on_conversation_and_not_top_level():
+    assert Conversation.model_validate(valid_conv(texts_today=[])).texts_today == []
+    with pytest.raises(ValidationError):              # no top-level texts_today anymore
+        validate_state(valid_state(texts_today={"since": None, "conversations": {}}))
 
 
 # ----------------------------------------------------------- is_group / handle
@@ -90,20 +96,6 @@ def test_identity_over_three_sentences_is_invalid():
         Conversation.model_validate(valid_conv(identity="One. Two. Three. Four."))
 
 
-# ----------------------------------------------------------------- daily/weekly caps
-def test_daily_at_cap_valid_over_cap_invalid():
-    seven = [{"date": "2026-05-%02d" % (i + 1), "text": "n"} for i in range(7)]
-    Conversation.model_validate(valid_conv(summary="s", daily=seven))
-    with pytest.raises(ValidationError):
-        Conversation.model_validate(valid_conv(summary="s", daily=seven + [{"date": "2026-05-08", "text": "n"}]))
-
-
-def test_weekly_over_cap_invalid():
-    six = [{"week_of": "2026-05-%02d" % (i + 1), "text": "n"} for i in range(6)]
-    with pytest.raises(ValidationError):
-        Conversation.model_validate(valid_conv(summary="s", weekly=six))
-
-
 # ------------------------------------------------------------------- history dated
 def test_history_iso_date_valid():
     Conversation.model_validate(valid_conv(history=[{"date": "2026-05-01", "text": "reconnected"}]))
@@ -118,27 +110,10 @@ def test_history_undated_is_invalid():
         Conversation.model_validate(valid_conv(history=[{"date": "last spring", "text": "x"}]))
 
 
-# ----------------------------------------------------- needs_reply => reply_reason (scoped)
-def test_skeleton_needs_reply_without_reason_is_valid():
-    # summary is None => rule is vacuous; deterministic needs_reply may be True with no reason.
-    Conversation.model_validate(valid_conv(needs_reply=True, summary=None, reply_reason=None))
-
-
-def test_summarized_needs_reply_without_reason_is_invalid():
-    with pytest.raises(ValidationError):
-        Conversation.model_validate(valid_conv(needs_reply=True, summary="A real summary.", reply_reason=None))
-
-
-def test_summarized_needs_reply_with_reason_is_valid():
-    Conversation.model_validate(
-        valid_conv(needs_reply=True, summary="A real summary.", reply_reason="He asked a direct question.")
-    )
-
-
 # --------------------------------------------------------------- tags subset of law
 def test_tags_in_law_valid():
     validate_state(
-        valid_state([valid_conv(summary="s", tags=["needs-scheduling"])]),
+        valid_state([valid_conv(tags=["needs-scheduling"])]),
         law={"needs-scheduling", "owe-money"},
     )
 
@@ -146,28 +121,13 @@ def test_tags_in_law_valid():
 def test_tags_outside_law_invalid():
     with pytest.raises(ValidationError):
         validate_state(
-            valid_state([valid_conv(summary="s", tags=["mystery-tag"])]),
+            valid_state([valid_conv(tags=["mystery-tag"])]),
             law={"needs-scheduling"},
         )
 
 
 def test_empty_tags_always_valid_even_without_law():
     validate_state(valid_state())  # no law passed, tags default []
-
-
-# ----------------------------------------------- caps derived from config (context-injected)
-def test_daily_cap_defaults_to_7_but_is_raisable():
-    nine = [{"date": "2026-05-%02d" % (i + 1), "text": "n"} for i in range(9)]
-    with pytest.raises(ValidationError):  # default cap 7
-        validate_state(valid_state([valid_conv(summary="s", daily=nine)]))
-    validate_state(valid_state([valid_conv(summary="s", daily=nine)]), daily_cap=10)  # config raised it
-
-
-def test_weekly_cap_defaults_to_5_but_is_raisable():
-    seven = [{"week_of": "2026-05-%02d" % (i + 1), "text": "n"} for i in range(7)]
-    with pytest.raises(ValidationError):  # default cap 5
-        validate_state(valid_state([valid_conv(summary="s", weekly=seven)]))
-    validate_state(valid_state([valid_conv(summary="s", weekly=seven)]), weekly_cap=9)  # config raised it
 
 
 # ------------------------------------------------------------------ extra forbidden

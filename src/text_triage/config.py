@@ -2,14 +2,11 @@
 "Steering lives in two files, never in code").
 
 Defaults baked into these models equal the designed behavior, so a missing file or omitted key
-falls back to the design. The note-array caps the schema enforces are DERIVED here from the window
-sizes (``daily_cap = weekly_days``; ``weekly_cap = ceil(monthly_days / 7)``) so changing a window
-in the yaml can never conflict with a hardcoded cap. A malformed or invalid file raises
-:class:`ConfigError` loudly rather than silently using stale defaults.
+falls back to the design. A malformed or invalid file raises :class:`ConfigError` loudly rather than
+silently using stale defaults.
 """
 from __future__ import annotations
 
-import math
 import os
 from pathlib import Path
 from typing import Literal, Optional, Union
@@ -78,16 +75,6 @@ class Config(_CBase):
     live: Live = Field(default_factory=Live)
     schedule: Schedule = Field(default_factory=Schedule)
     tags: Tags = Field(default_factory=Tags)
-
-    @property
-    def daily_cap(self) -> int:
-        """Max retained daily notes = days between weekly clears."""
-        return self.windows.weekly_days
-
-    @property
-    def weekly_cap(self) -> int:
-        """Max retained weekly notes = weeks between monthly resets."""
-        return math.ceil(self.windows.monthly_days / 7)
 
 
 def _discover_path(explicit: Optional[Union[str, Path]]) -> Optional[Path]:

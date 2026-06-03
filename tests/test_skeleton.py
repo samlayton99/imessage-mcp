@@ -91,7 +91,7 @@ def test_one_to_one_deterministic_fields():
 
 def test_llm_fields_left_blank():
     c = build_skeleton(make_export([conv_1to1()])).conversations[0]
-    assert c.identity is None and c.summary is None and c.reply_reason is None
+    assert c.identity is None and c.texts_today == []
     assert c.tags == [] and c.daily == [] and c.weekly == [] and c.history == []
     assert c.monthly is None and c.edited == {}
 
@@ -133,12 +133,6 @@ def test_generated_at_uses_override_then_export():
     assert build_skeleton(make_export([]), generated_at="2099-01-01 00:00").generated_at == "2099-01-01 00:00"
 
 
-def test_texts_today_is_empty():
-    s = build_skeleton(make_export([conv_1to1()]))
-    assert s.texts_today.since is None
-    assert s.texts_today.conversations == {}
-
-
 # ------------------------------------------------ golden regression (committed fixture)
 def test_build_skeleton_matches_golden_fixture():
     export = json.loads((FIXTURES / "synthetic_export.json").read_text())
@@ -154,8 +148,6 @@ def test_every_fixture_record_validates():
     assert len(s.unresponded) == 1
 
 
-def test_build_skeleton_accepts_config():
-    from text_triage.config import Config
-
-    s = build_skeleton(make_export([conv_1to1()]), config=Config())
-    assert isinstance(s, State)
+def test_skeleton_texts_today_is_empty():
+    c = build_skeleton(make_export([conv_1to1()])).conversations[0]
+    assert c.texts_today == []

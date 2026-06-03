@@ -43,11 +43,13 @@ independent of the repo's `conditions.yaml` and `watch.md` — never depend on t
 (editing a real knob must not break the suite).
 
 ## Project shape
-`src/text_triage/`: `extract` (chat.db → JSON) · `schema` (Pydantic state.json contract) ·
-`state_io` (atomic write+lock) · `skeleton` (deterministic facts) · `config` (conditions.yaml) ·
-`tags` (watch.md → active tag law) · `engine` (model-call seam: claude_code + StubEngine) ·
-`summarize` (daily LLM summary: assemble → validate → one retry → never land invalid) ·
-`cli` (subcommand dispatch). Two steering files: `conditions.yaml` (deterministic knobs) +
-`watch.md` (tag scratchpad). Real exports / `state.json` / secrets / the handoff bundle are
-gitignored; only PII-free synthetic fixtures are committed. Roadmap + milestones: the handoff
-`PLAN.md` / `CONTEXT.md` (gitignored).
+`src/text_triage/`: `extract` (chat.db → JSON) · `schema` (Pydantic state.json contract; no rolling
+`summary`, no list caps, `texts_today` on each record) · `state_io` (atomic write+lock) · `skeleton`
+(deterministic facts) · `config` (conditions.yaml) · `tags` (watch.md → tag law with lifetimes +
+`effective_tags`) · `engine` (async model-call seam; `api_key` default / `agent_sdk` optional, NOT
+full Claude Code — being rebuilt from the slow `claude -p`; see PLAN "Engine") · `summarize`
+(daily/weekly/monthly agents: assemble → validate → one retry → never land invalid) · `cli`
+(`extract`/`summarize --mode`). Two steering files: `conditions.yaml` (knobs) + `watch.md` (tag
+scratchpad). Real exports / `state.json` / secrets / the handoff bundle are gitignored; only PII-free
+synthetic fixtures are committed. Design + status + decision log: the handoff `PLAN.md` / `CONTEXT.md`
+(gitignored).

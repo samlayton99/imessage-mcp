@@ -56,19 +56,6 @@ def test_env_var_path_is_used(tmp_path, monkeypatch):
     assert load_config().windows.weekly_days == 14
 
 
-# ----------------------------------------------------------------- derived caps
-def test_derived_caps_default():
-    c = Config()
-    assert c.daily_cap == 7                 # = weekly_days
-    assert c.weekly_cap == 5                # = ceil(monthly_days / 7) = ceil(30/7)
-
-
-def test_derived_caps_track_windows(tmp_path):
-    c = load_config(write_yaml(tmp_path, "windows:\n  weekly_days: 10\n  monthly_days: 60\n"))
-    assert c.daily_cap == 10                # tracks weekly_days
-    assert c.weekly_cap == 9                # ceil(60/7) — no longer conflicts with a hardcoded 5
-
-
 # ----------------------------------------------------------------- validation / robustness
 def test_malformed_yaml_raises_config_error(tmp_path):
     p = tmp_path / "conditions.yaml"

@@ -1,20 +1,24 @@
-"""The daily summarizer (PLAN Step 0): turn an extract export + the previous state into a fresh,
-schema-valid state.json. The LLM writes prose (identity/summary/reply_reason/daily note) and
-proposes tags; code owns the facts, the merge, the tag-law filter, validation + retry, and never
-lets an invalid record land. Tested entirely with a StubEngine — no LLM, no network."""
+"""The three summary agents (daily/weekly/monthly). Code owns the facts; each agent writes only its
+own fields (the matrix); tags carry lifetimes and the add/delete rules per cadence. Tested entirely
+with a StubEngine — no LLM, no network."""
+import datetime
 import json
-
-import pytest
 
 from text_triage.config import Config
 from text_triage.engine import StubEngine
 from text_triage.schema import State
-from text_triage.summarize import build_daily_prompt, summarize_daily
+from text_triage.summarize import (build_daily_prompt, summarize_daily, summarize_monthly,
+                                    summarize_weekly)
+from text_triage.tags import TagSpec
 
-LAW = {"family": "Family members.", "needs-scheduling": "A time/date to set.", "church": "Church."}
+LAW = {
+    "family": TagSpec("family", "Family.", "sticky", None),
+    "needs-scheduling": TagSpec("needs-scheduling", "Sched.", "ttl", 14),
+    "church": TagSpec("church", "Church.", "sticky", None),
+}
 
 
-# ----------------------------------------------------------------- export/prev helpers
+# ----------------------------------------------------------------- export / prev helpers
 def msg(rowid=10, dt="2026-06-01 10:00", sender="Avery Quinn", text="can we meet thursday?"):
     return {"message_rowid": rowid, "date": 99, "datetime": dt, "sender": sender, "text": text}
 
@@ -29,213 +33,221 @@ def conv(chat_rowid=1, name="Avery Quinn", handle="+15550000201", responded=Fals
 
 
 def export_with(convs, generated_at="2026-06-02 09:00", watermark=None, unresponded=None):
-    return {"generated_at": generated_at, "window": "monthly", "context_messages": 10,
+    return {"generated_at": generated_at, "window": "weekly", "context_messages": 10,
             "watermark": watermark or {"max_date_raw": 100, "max_message_rowid": 10},
             "conversations": convs, "unresponded": unresponded or []}
 
 
-def good(summary="They asked to meet Thursday.", identity="A college climbing friend.",
-         reply_reason="Direct question about Thursday; their message is last.",
-         daily_note="Asked to meet Thursday; unanswered.", tags=None):
-    return json.dumps({"identity": identity, "summary": summary, "reply_reason": reply_reason,
-                       "daily_note": daily_note, "tags": tags if tags is not None else []})
+def daily_json(daily_note="Asked to meet Thursday.", tags=None):
+    return json.dumps({"daily_note": daily_note, "tags": tags if tags is not None else []})
 
 
-def valid_prev_record(chat_rowid=999, name="Old Friend", handle="+15550009999"):
-    return {"chat_rowid": chat_rowid, "name": name, "is_group": False, "handle": handle,
-            "members": None, "status": "active", "last_from": "me",
-            "last_message_at": "2026-05-01 10:00", "needs_reply": False,
-            "summary": "Carried summary.", "identity": "An old friend.", "tags": [],
-            "daily": [], "weekly": [], "monthly": None, "history": [], "edited": {}}
+def weekly_json(weekly_note="Quiet week; one scheduling thread.", identity=None, tags=None):
+    return json.dumps({"identity": identity, "weekly_note": weekly_note,
+                       "tags": tags if tags is not None else []})
 
 
-# ----------------------------------------------------------------------------- tests
-def test_returns_validated_state_with_llm_fields():
-    s = summarize_daily(export_with([conv()]), engine=StubEngine([good()]), config=Config(), law=LAW)
+def monthly_json(monthly="Spent the month planning.", history_line="2026-06: planning.",
+                 identity=None, tags=None):
+    return json.dumps({"identity": identity, "monthly": monthly, "history_line": history_line,
+                       "tags": tags if tags is not None else []})
+
+
+def prev_record(chat_rowid=1, name="Avery Quinn", handle="+15550000201", **over):
+    base = {"chat_rowid": chat_rowid, "name": name, "is_group": False, "handle": handle,
+            "members": None, "status": "active", "last_from": "them",
+            "last_message_at": "2026-06-01 10:00", "needs_reply": True, "texts_today": [],
+            "identity": "A friend.", "tags": [], "daily": [], "weekly": [], "monthly": None,
+            "history": [], "edited": {}}
+    base.update(over)
+    return base
+
+
+def prev_state(records):
+    return {"conversations": records}
+
+
+# ------------------------------------------------------------------------------ daily
+def test_daily_appends_note_adds_tags_and_clears_texts_today():
+    prev = prev_state([prev_record(tags=["family"], identity="A friend.")])
+    s = summarize_daily(export_with([conv()]), engine=StubEngine([daily_json(tags=["needs-scheduling"])]),
+                        config=Config(), prev_state=prev, law=LAW)
     assert isinstance(s, State)
     c = s.conversations[0]
-    assert c.summary == "They asked to meet Thursday."
-    assert c.identity == "A college climbing friend."        # proposed (was blank)
-    assert c.reply_reason and c.needs_reply is True          # needs_reply 1:1 -> reason required
-    assert [n.text for n in c.daily] == ["Asked to meet Thursday; unanswered."]
-    assert c.daily[0].date == "2026-06-02"                   # from generated_at
-    assert c.last_updated == "2026-06-02 09:00"
+    assert [n.text for n in c.daily] == ["Asked to meet Thursday."]
+    assert c.tags == ["family", "needs-scheduling"]      # add-only union
+    assert c.texts_today == []                           # read then cleared
+    assert c.identity == "A friend."                     # daily never touches identity
 
 
-def test_prompt_contains_raw_text_identity_and_law():
-    p = build_daily_prompt(
-        {"name": "Avery Quinn", "is_group": False, "needs_reply": True},
-        [msg(text="can we meet thursday?")], prev=None, law=LAW)
-    assert "meet thursday" in p
-    assert "identity" in p.lower()
-    assert "needs-scheduling" in p  # active law slugs offered to the model
+def test_daily_does_not_delete_tags():
+    prev = prev_state([prev_record(tags=["family", "church"])])
+    s = summarize_daily(export_with([conv()]), engine=StubEngine([daily_json(tags=[])]),  # proposes none
+                        config=Config(), prev_state=prev, law=LAW)
+    assert s.conversations[0].tags == ["family", "church"]   # nothing removed
 
 
-def test_invalid_json_then_valid_retries_once():
-    eng = StubEngine(["not json at all", good()])
-    s = summarize_daily(export_with([conv()]), engine=eng, config=Config(), law=LAW)
-    assert len(eng.calls) == 2
-    assert s.conversations[0].summary == "They asked to meet Thursday."
-
-
-def test_two_failures_fall_back_to_skeleton_record():
-    # an identity of 5 sentences violates the schema -> invalid both times -> never lands
-    bad = good(identity="One. Two. Three. Four. Five.")
-    eng = StubEngine([bad, bad])
-    s = summarize_daily(export_with([conv()]), engine=eng, config=Config(), law=LAW)
-    assert len(eng.calls) == 2
+def test_daily_carries_prev_monthly_and_history():
+    prev = prev_state([prev_record(monthly="prev monthly", history=[{"date": "2026-05-01", "text": "h"}])])
+    s = summarize_daily(export_with([conv()]), engine=StubEngine([daily_json()]),
+                        config=Config(), prev_state=prev, law=LAW)
     c = s.conversations[0]
-    assert c.summary is None and c.identity is None          # fell back to deterministic skeleton
-    assert c.needs_reply is True                             # facts preserved
+    assert c.monthly == "prev monthly" and [h.text for h in c.history] == ["h"]
 
 
-def test_edited_identity_is_never_overwritten():
-    prev = {"conversations": [{**valid_prev_record(chat_rowid=1, name="Avery Quinn",
-                                                    handle="+15550000201"),
-                               "identity": "Set by the user.",
-                               "edited": {"identity": "user:2026-05-20"}}]}
-    s = summarize_daily(export_with([conv()]), engine=StubEngine([good()]),
+def test_daily_prompt_has_raw_identity_law_lifetimes_and_voice():
+    p = build_daily_prompt({"name": "Avery Quinn", "is_group": False}, [msg(text="meet thursday?")],
+                           prev={"identity": "A friend.", "monthly": "m", "weekly": [], "daily": [],
+                                 "history": []}, law=LAW)
+    assert "meet thursday" in p and "Avery Quinn" in p and "A friend." in p
+    assert "needs-scheduling (ttl 14d)" in p and "family (sticky)" in p
+    assert "assume" in p.lower()
+
+
+def test_carried_tag_not_in_law_is_dropped():
+    prev = prev_state([prev_record(tags=["family", "obsolete-tag"])])
+    s = summarize_daily(export_with([conv()]), engine=StubEngine([daily_json(tags=[])]),
                         config=Config(), prev_state=prev, law=LAW)
-    assert s.conversations[0].identity == "Set by the user."
+    assert s.conversations[0].tags == ["family"]          # obsolete-tag dropped (not in LAW)
 
 
-def test_identity_is_sticky_once_set():
-    prev = {"conversations": [{**valid_prev_record(chat_rowid=1, name="Avery Quinn",
-                                                   handle="+15550000201"),
-                               "identity": "Existing identity."}]}
-    s = summarize_daily(export_with([conv()]), engine=StubEngine([good(identity="New proposal.")]),
-                        config=Config(), prev_state=prev, law=LAW)
-    assert s.conversations[0].identity == "Existing identity."
-
-
-def test_prev_only_conversation_is_carried_forward_without_an_engine_call():
-    eng = StubEngine([good()])
-    prev = {"conversations": [valid_prev_record(chat_rowid=999)]}
-    s = summarize_daily(export_with([conv(chat_rowid=1)]), engine=eng,
-                        config=Config(), prev_state=prev, law=LAW)
-    assert len(eng.calls) == 1  # only the conversation with new messages
-    ids = {c.chat_rowid for c in s.conversations}
-    assert ids == {1, 999}
-    carried = next(c for c in s.conversations if c.chat_rowid == 999)
-    assert carried.summary == "Carried summary."
-
-
-def test_out_of_vocab_tags_are_dropped():
-    s = summarize_daily(export_with([conv()]),
-                        engine=StubEngine([good(tags=["family", "not-a-real-tag"])]),
-                        config=Config(), law=LAW)
-    assert s.conversations[0].tags == ["family"]
-
-
-def test_needs_reply_stays_deterministic_even_if_llm_disagrees():
-    # responded 1:1 -> gate says no reply owed; reply_reason must be dropped, summary still lands
-    s = summarize_daily(export_with([conv(responded=True)]),
-                        engine=StubEngine([good(reply_reason="I think they're owed one")]),
-                        config=Config(), law=LAW)
+def test_daily_two_failures_fall_back_to_prior_record():
+    prev = prev_state([prev_record(monthly="kept", tags=["family"])])
+    eng = StubEngine(["not json", "still not json"])
+    s = summarize_daily(export_with([conv()]), engine=eng, config=Config(), prev_state=prev, law=LAW)
     c = s.conversations[0]
-    assert c.needs_reply is False and c.reply_reason is None
-    assert c.summary == "They asked to meet Thursday."
+    assert len(eng.calls) == 2
+    assert c.monthly == "kept" and c.daily == [] and c.tags == ["family"]   # prior kept, no new note
 
 
-def test_daily_notes_trimmed_to_cap():
-    prior = [{"date": f"2026-05-{25 + i}", "text": f"note {i}"} for i in range(7)]  # 25..31, == cap 7
-    prev = {"conversations": [{**valid_prev_record(chat_rowid=1, name="Avery Quinn",
-                                                   handle="+15550000201"), "daily": prior}]}
-    s = summarize_daily(export_with([conv()]), engine=StubEngine([good()]),
-                        config=Config(), prev_state=prev, law=LAW)
-    dates = [n.date for n in s.conversations[0].daily]
-    assert len(dates) == 7                       # capped
-    assert dates[0] == "2026-05-26"              # oldest dropped
-    assert dates[-1] == "2026-06-02"             # newest appended
+def test_prev_only_conversation_carried_forward():
+    eng = StubEngine([daily_json()])
+    prev = prev_state([prev_record(chat_rowid=999, name="Old", handle="+15550009999",
+                                   monthly="carried", last_from="me", needs_reply=False)])
+    s = summarize_daily(export_with([conv(chat_rowid=1)]), engine=eng, config=Config(),
+                        prev_state=prev, law=LAW)
+    assert len(eng.calls) == 1
+    assert {c.chat_rowid for c in s.conversations} == {1, 999}
+    assert next(c for c in s.conversations if c.chat_rowid == 999).monthly == "carried"
 
 
 def test_limit_only_summarizes_top_n():
     convs = [conv(chat_rowid=1, name="A", handle="+15550000001"),
-             conv(chat_rowid=2, name="B", handle="+15550000002"),
-             conv(chat_rowid=3, name="C", handle="+15550000003")]
-    eng = StubEngine([good()])  # exactly one response -> proves the engine is called only once
-    s = summarize_daily(export_with(convs), engine=eng, config=Config(), law=LAW, limit=1)
-    assert len(eng.calls) == 1
-    assert len(s.conversations) == 3                       # all emitted, only the top one summarized
-    assert s.conversations[0].summary == "They asked to meet Thursday."
-    assert s.conversations[1].summary is None and s.conversations[2].summary is None
-
-
-def test_limit_beyond_window_carries_prev_summary():
-    prev = {"conversations": [{**valid_prev_record(chat_rowid=2, name="B", handle="+15550000002"),
-                               "summary": "Older carried summary."}]}
-    convs = [conv(chat_rowid=1, name="A", handle="+15550000001"),
              conv(chat_rowid=2, name="B", handle="+15550000002")]
-    s = summarize_daily(export_with(convs), engine=StubEngine([good()]), config=Config(),
-                        prev_state=prev, law=LAW, limit=1)
-    beyond = next(c for c in s.conversations if c.chat_rowid == 2)
-    assert beyond.summary == "Older carried summary."      # not wiped, not re-summarized
+    eng = StubEngine([daily_json()])                      # only one response
+    s = summarize_daily(export_with(convs), engine=eng, config=Config(), law=LAW, limit=1)
+    assert len(eng.calls) == 1 and len(s.conversations) == 2
+    assert len(s.conversations[0].daily) == 1 and len(s.conversations[1].daily) == 0
 
 
-# --------------------------------------------------------------------- CLI (`summarize` subcommand)
+# ------------------------------------------------------------------------------ weekly
+def test_weekly_appends_note_and_clears_daily():
+    prev = prev_state([prev_record(daily=[{"date": "2026-06-01", "text": "d1"}])])
+    s = summarize_weekly(export_with([conv()]), engine=StubEngine([weekly_json()]),
+                         config=Config(), prev_state=prev, law=LAW)
+    c = s.conversations[0]
+    assert [w.text for w in c.weekly] == ["Quiet week; one scheduling thread."]
+    assert c.daily == []                                  # weekly clears daily
+
+
+def test_weekly_can_delete_tags():
+    prev = prev_state([prev_record(tags=["family", "church"])])
+    s = summarize_weekly(export_with([conv()]), engine=StubEngine([weekly_json(tags=["family"])]),
+                         config=Config(), prev_state=prev, law=LAW)
+    assert s.conversations[0].tags == ["family"]          # church dropped (full replace)
+
+
+def test_weekly_preserves_edited_tags_even_on_replace():
+    prev = prev_state([prev_record(tags=["family", "church"], edited={"tags": "user:2026-05-01"})])
+    s = summarize_weekly(export_with([conv()]), engine=StubEngine([weekly_json(tags=["needs-scheduling"])]),
+                         config=Config(), prev_state=prev, law=LAW)
+    assert set(s.conversations[0].tags) == {"family", "church", "needs-scheduling"}  # union, not replace
+
+
+def test_weekly_identity_sticky_once_set():
+    prev = prev_state([prev_record(identity="Existing.")])
+    s = summarize_weekly(export_with([conv()]), engine=StubEngine([weekly_json(identity="New proposal.")]),
+                         config=Config(), prev_state=prev, law=LAW)
+    assert s.conversations[0].identity == "Existing."     # not overwritten
+
+
+def test_weekly_proposes_identity_when_blank():
+    prev = prev_state([prev_record(identity=None)])
+    s = summarize_weekly(export_with([conv()]), engine=StubEngine([weekly_json(identity="A new friend.")]),
+                         config=Config(), prev_state=prev, law=LAW)
+    assert s.conversations[0].identity == "A new friend."
+
+
+# ------------------------------------------------------------------------------ monthly
+def test_monthly_rewrites_condenses_history_and_clears_weekly_and_daily():
+    prev = prev_state([prev_record(monthly="old", weekly=[{"week_of": "2026-W22", "text": "w"}],
+                                   daily=[{"date": "2026-06-01", "text": "d"}])])
+    s = summarize_monthly(export_with([conv()]), engine=StubEngine([monthly_json()]),
+                          config=Config(), prev_state=prev, law=LAW)
+    c = s.conversations[0]
+    assert c.monthly == "Spent the month planning."
+    assert [h.text for h in c.history] == ["2026-06: planning."]
+    assert c.weekly == [] and c.daily == []               # both cleared
+
+
+def test_monthly_marks_dormant_when_silent_over_30d():
+    old = conv(messages=[msg(dt="2026-04-01 10:00", text="old")])
+    s = summarize_monthly(export_with([old], generated_at="2026-06-02 09:00"),
+                          engine=StubEngine([monthly_json()]), config=Config(), law=LAW)
+    assert s.conversations[0].status == "dormant"
+
+
+def test_monthly_active_when_recent():
+    recent = conv(messages=[msg(dt="2026-06-01 10:00", text="recent")])
+    s = summarize_monthly(export_with([recent], generated_at="2026-06-02 09:00"),
+                          engine=StubEngine([monthly_json()]), config=Config(), law=LAW)
+    assert s.conversations[0].status == "active"
+
+
+# --------------------------------------------------------------------- CLI (`--mode`)
 def _recent_db_date(days_ago):
-    """Apple-ns timestamp `days_ago` before *now*, so the message always lands inside the window
-    regardless of when the test runs (the CLI uses the real clock)."""
-    import datetime
     now = datetime.datetime.now().timestamp()
     return int((now - days_ago * 86400 - 978307200) * 1_000_000_000)
 
 
-def _cli_setup(tmp_path):
+def _cli(tmp_path, watch_line="- needs-scheduling: set a time, about 14 days"):
     cfg = tmp_path / "conditions.yaml"
-    cfg.write_text("{}\n")                                   # hermetic from the repo config
+    cfg.write_text("{}\n")
     watch = tmp_path / "watch.md"
-    watch.write_text("- needs-scheduling: set a time\n")     # hermetic from the repo watch.md
+    watch.write_text(watch_line + "\n")
+    return cfg, watch
+
+
+def test_cli_monthly_writes_validated_state(tmp_path, chatdb_factory):
+    from text_triage import summarize as S
+    cfg, watch = _cli(tmp_path)
     spec = {"identifier": "+15550000201", "display_name": None, "handles": ["+15550000201"],
             "messages": [{"date": _recent_db_date(3), "from_me": False,
-                          "handle": "+15550000201", "text": "can we meet thursday?"}]}
-    return cfg, watch, spec
-
-
-def _cli_args(tmp_path, out):
-    return ["--window", "monthly", "--db", str(tmp_path / "chat.db"),
-            "--addressbook", str(tmp_path / "ab"), "--out", str(out)]
-
-
-def test_cli_summarize_writes_validated_state(tmp_path, chatdb_factory):
-    from text_triage import summarize as S
-    cfg, watch, spec = _cli_setup(tmp_path)
+                          "handle": "+15550000201", "text": "meet thursday?"}]}
     chatdb_factory(tmp_path / "chat.db", [spec])
     out = tmp_path / "state.json"
-    rc = S.main(_cli_args(tmp_path, out) + ["--config", str(cfg), "--watch", str(watch)],
-                engine=StubEngine([good(tags=["needs-scheduling"])]))
+    rc = S.main(["--mode", "monthly", "--db", str(tmp_path / "chat.db"),
+                 "--addressbook", str(tmp_path / "ab"), "--out", str(out),
+                 "--config", str(cfg), "--watch", str(watch)],
+                engine=StubEngine([monthly_json(tags=["needs-scheduling"])]))
     assert rc == 0
     c = json.loads(out.read_text())["conversations"][0]
-    assert c["summary"] == "They asked to meet Thursday."
+    assert c["monthly"] == "Spent the month planning."
     assert c["tags"] == ["needs-scheduling"]
-    assert c["needs_reply"] is True and c["reply_reason"]
 
 
-def test_cli_limit_caps_engine_calls(tmp_path, chatdb_factory):
+def test_cli_daily_dispatch_writes_a_note(tmp_path, chatdb_factory):
     from text_triage import summarize as S
-    cfg, watch, spec = _cli_setup(tmp_path)
-    spec2 = {"identifier": "+15550000202", "display_name": None, "handles": ["+15550000202"],
-             "messages": [{"date": _recent_db_date(2), "from_me": False,
-                           "handle": "+15550000202", "text": "you free sunday?"}]}
-    chatdb_factory(tmp_path / "chat.db", [spec, spec2])
-    out = tmp_path / "state.json"
-    eng = StubEngine([good()])  # one response; --limit 1 must not ask for a second
-    rc = S.main(_cli_args(tmp_path, out) + ["--limit", "1", "--config", str(cfg), "--watch", str(watch)],
-                engine=eng)
-    assert rc == 0
-    assert len(eng.calls) == 1
-    data = json.loads(out.read_text())
-    assert len(data["conversations"]) == 2
-    assert sum(1 for c in data["conversations"] if c["summary"]) == 1
-
-
-def test_cli_rerun_reads_prev_state_and_appends_a_note(tmp_path, chatdb_factory):
-    from text_triage import summarize as S
-    cfg, watch, spec = _cli_setup(tmp_path)
+    cfg, watch = _cli(tmp_path)
+    spec = {"identifier": "+15550000201", "display_name": None, "handles": ["+15550000201"],
+            "messages": [{"date": _recent_db_date(1 / 24.0), "from_me": False,   # ~1 hour ago
+                          "handle": "+15550000201", "text": "you around?"}]}
     chatdb_factory(tmp_path / "chat.db", [spec])
     out = tmp_path / "state.json"
-    extra = ["--config", str(cfg), "--watch", str(watch)]
-    S.main(_cli_args(tmp_path, out) + extra, engine=StubEngine([good()]))
-    S.main(_cli_args(tmp_path, out) + extra, engine=StubEngine([good(daily_note="second day note")]))
-    notes = [n["text"] for n in json.loads(out.read_text())["conversations"][0]["daily"]]
-    assert notes == ["Asked to meet Thursday; unanswered.", "second day note"]  # prev read + append
+    rc = S.main(["--mode", "daily", "--db", str(tmp_path / "chat.db"),
+                 "--addressbook", str(tmp_path / "ab"), "--out", str(out),
+                 "--config", str(cfg), "--watch", str(watch)],
+                engine=StubEngine([daily_json()]))
+    assert rc == 0
+    convs = json.loads(out.read_text())["conversations"]
+    assert convs and convs[0]["daily"][0]["text"] == "Asked to meet Thursday."

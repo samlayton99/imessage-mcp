@@ -35,8 +35,8 @@ def test_dispatches_summarize_subcommand(monkeypatch):
         return 0
 
     monkeypatch.setattr(S, "main", fake_main)
-    assert cli.main(["summarize", "--window", "monthly", "--out", "x"]) == 0
-    assert seen["argv"] == ["--window", "monthly", "--out", "x"]
+    assert cli.main(["summarize", "--mode", "monthly", "--out", "x"]) == 0
+    assert seen["argv"] == ["--mode", "monthly", "--out", "x"]
 
 
 def test_no_subcommand_returns_usage_code(capsys):

@@ -95,7 +95,6 @@ def test_invalid_record_is_rejected_before_any_file_appears(tmp_path):
 def test_write_enforces_tag_law(tmp_path):
     path = tmp_path / "state.json"
     data = good_state_dict()
-    data["conversations"][0]["summary"] = "s"
     data["conversations"][0]["tags"] = ["mystery"]
     with pytest.raises(ValidationError):
         state_io.write_state(data, path, law={"needs-scheduling"})
@@ -107,18 +106,6 @@ def test_read_validates_and_rejects_corrupt_state(tmp_path):
     path.write_text(json.dumps({"generated_at": "x"}))  # missing watermark
     with pytest.raises(ValidationError):
         state_io.read_state(path)
-
-
-def test_write_forwards_note_caps(tmp_path):
-    data = good_state_dict()
-    data["conversations"][0]["needs_reply"] = False  # isolate the cap rule from the reply-reason rule
-    data["conversations"][0]["summary"] = "s"
-    data["conversations"][0]["daily"] = [{"date": "2026-05-%02d" % (i + 1), "text": "n"} for i in range(8)]
-    path = tmp_path / "state.json"
-    with pytest.raises(ValidationError):
-        state_io.write_state(data, path)              # default cap 7 -> 8 notes invalid
-    state_io.write_state(data, path, daily_cap=10)    # config raised the cap -> lands
-    assert path.exists()
 
 
 # ------------------------------------------------------------------ lock

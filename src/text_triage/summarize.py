@@ -1,21 +1,25 @@
-"""The daily summarizer (PLAN Step 0, daily mode only).
+"""The summary agents (PLAN Step 0+amendments): daily, weekly, monthly.
 
-Turns an :func:`text_triage.extract.extract` export plus the previous ``state.json`` into a fresh,
-fully-validated :class:`~text_triage.schema.State`. The split PLAN demands:
+Each turns an :func:`text_triage.extract.extract` export + the previous ``state.json`` into a fresh,
+validated :class:`~text_triage.schema.State`, with strictly non-overlapping write power (the
+agent→field matrix in the handoff PLAN.md):
 
-  * **code owns the facts** — the deterministic skeleton (who texted last, ``needs_reply``,
-    identity/members, watermark) comes from :func:`build_skeleton`; the LLM never moves it.
-  * **the LLM enriches prose** — ``identity`` (only when blank, sticky once set), ``summary``,
-    ``reply_reason`` (only when a reply is owed), one ``daily`` note, and *proposes* ``tags``.
-  * **invalid never lands** — each merged record is schema-validated with one correction retry; on
-    persistent failure the conversation falls back to its deterministic skeleton (no prose), so a
-    single bad LLM return can never corrupt the batch.
+  * **daily** — reads the whole record + new raw msgs; appends one ``daily`` note, ADDS tags (never
+    deletes), clears its ``texts_today``. Touches nothing else.
+  * **weekly** — re-reads the last 7 days raw; appends one ``weekly`` note, **clears ``daily[]``**,
+    rarely (re)proposes a blank ``identity``, add/deletes tags.
+  * **monthly** — re-reads the last 30 days raw; rewrites ``monthly``, condenses one ``history``
+    line, **clears ``weekly[]`` and ``daily[]``**, rarely (re)proposes a blank ``identity``,
+    add/deletes tags, marks silent-30d conversations ``dormant``.
 
-Step 0 reads the raw texts from the extract *export* (the live ``texts_today`` layer is Steps 1-2);
-when that lands, only the raw source changes — assembly/validation/merge here is unchanged.
+Code owns the facts (`build_skeleton`); the LLM writes prose + proposes tags; each record is
+schema-validated with one retry, and on persistent failure the prior record is kept untouched, so a
+bad LLM return never corrupts the batch. Prompts live in ``agents/<mode>.md`` (filled by
+``prompts.render``); tags carry lifetimes (``tags.py``) and are shown to the model with hints.
 """
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 import re
@@ -24,58 +28,93 @@ from typing import Optional, Sequence, Union
 
 from text_triage.config import Config
 from text_triage.engine import Engine
+from text_triage.prompts import render
 from text_triage.schema import Conversation, State, validate_state
 from text_triage.skeleton import build_skeleton
-from text_triage.tags import load_law
+from text_triage.tags import active_slugs, load_law
 
-__all__ = ["summarize_daily", "build_daily_prompt", "main"]
+__all__ = [
+    "summarize_daily", "summarize_weekly", "summarize_monthly",
+    "build_daily_prompt", "build_weekly_prompt", "build_monthly_prompt", "main",
+]
 
 log = logging.getLogger(__name__)
 
+# Agent-authored fields carried forward from the previous record (facts come fresh from extract).
+_CARRY = ("identity", "tags", "daily", "weekly", "monthly", "history", "edited", "texts_today")
 
-def build_daily_prompt(skel: dict, raw: list, *, prev: Optional[dict], law: dict) -> str:
-    """Assemble the per-conversation daily prompt: who they are + prior notes + the active tag law +
-    the raw messages + the exact JSON shape to return. ``skel`` carries the deterministic facts
-    (``name``, ``is_group``, ``needs_reply``)."""
+
+# --------------------------------------------------------------------------- formatting
+def _kind(skel: dict) -> str:
+    return "group" if skel.get("is_group") else "1:1"
+
+
+def _format_law(law: dict) -> str:
+    lines = []
+    for slug, spec in sorted(law.items()):
+        life = "sticky" if spec.lifetime == "sticky" else f"ttl {spec.ttl_days}d"
+        lines.append(f"  - {slug} ({life}): {spec.description}")
+    return "\n".join(lines) or "  (none)"
+
+
+def _format_messages(msgs: list) -> str:
+    return "\n".join(f"  [{m['datetime']}] {m['sender']}: {m['text']}" for m in msgs) or "  (no messages)"
+
+
+def _format_dated(notes: list) -> str:
+    return "\n".join(f"  - {n['date']}: {n['text']}" for n in (notes or [])) or "  (none)"
+
+
+def _format_weekly(notes: list) -> str:
+    return "\n".join(f"  - {n['week_of']}: {n['text']}" for n in (notes or [])) or "  (none)"
+
+
+# ------------------------------------------------------------------------- prompt builders
+def build_daily_prompt(skel: dict, raw: list, *, prev: Optional[dict], law: dict,
+                       agents_dir=None) -> str:
     prev = prev or {}
-    identity = prev.get("identity") or "(none yet — propose one if the messages support it)"
-    prev_summary = prev.get("summary") or "(none yet)"
-    prev_daily = "\n".join(f"  - {n['date']}: {n['text']}" for n in (prev.get("daily") or [])) or "  (none)"
-    prev_monthly = prev.get("monthly") or "(none)"
-    law_lines = "\n".join(f"  - {s}: {d}" for s, d in sorted(law.items())) or "  (none)"
-    msg_lines = "\n".join(f"  [{m['datetime']}] {m['sender']}: {m['text']}" for m in raw) or "  (no messages)"
-    reply_clause = (
-        "A reply IS owed (the last message is theirs). Provide a one-sentence `reply_reason`."
-        if skel.get("needs_reply") else
-        "No reply is owed. Set `reply_reason` to null."
-    )
-    return f"""You maintain a concise, factual memory record for one iMessage conversation.
-
-Conversation: {skel.get('name')} ({'group' if skel.get('is_group') else '1:1'})
-Their current identity note: {identity}
-Previous rolling summary: {prev_summary}
-Previous daily notes:
-{prev_daily}
-Previous monthly note: {prev_monthly}
-
-Active tags you may apply (use ONLY these slugs; omit the rest):
-{law_lines}
-
-Raw messages (oldest first):
-{msg_lines}
-
-{reply_clause}
-
-Return ONLY a JSON object, no prose, with exactly these keys:
-{{
-  "identity": "<= 3 sentences on who they are, or null if unknown",
-  "summary": "the new rolling summary (read first by an agent)",
-  "reply_reason": "one sentence on why a reply is owed, or null",
-  "daily_note": "one short dated-style line capturing what happened",
-  "tags": ["slug", ...]   // subset of the active tags above, or []
-}}"""
+    return render("daily", {
+        "name": skel.get("name"), "kind": _kind(skel),
+        "identity": prev.get("identity") or "(none yet)",
+        "monthly": prev.get("monthly") or "(none yet)",
+        "weekly": _format_weekly(prev.get("weekly")),
+        "daily": _format_dated(prev.get("daily")),
+        "history": _format_dated(prev.get("history")),
+        "law": _format_law(law),
+        "messages": _format_messages(raw),
+    }, agents_dir=agents_dir)
 
 
+def build_weekly_prompt(skel: dict, raw: list, *, prev: Optional[dict], law: dict,
+                        agents_dir=None) -> str:
+    prev = prev or {}
+    return render("weekly", {
+        "name": skel.get("name"), "kind": _kind(skel),
+        "identity": prev.get("identity") or "(none yet)",
+        "monthly": prev.get("monthly") or "(none yet)",
+        "history": _format_dated(prev.get("history")),
+        "law": _format_law(law),
+        "messages": _format_messages(raw),
+    }, agents_dir=agents_dir)
+
+
+def build_monthly_prompt(skel: dict, raw: list, *, prev: Optional[dict], law: dict,
+                         agents_dir=None) -> str:
+    prev = prev or {}
+    return render("monthly", {
+        "name": skel.get("name"), "kind": _kind(skel),
+        "identity": prev.get("identity") or "(none yet)",
+        "monthly": prev.get("monthly") or "(none yet)",
+        "history": _format_dated(prev.get("history")),
+        "law": _format_law(law),
+        "messages": _format_messages(raw),
+    }, agents_dir=agents_dir)
+
+
+_BUILDERS = {"daily": build_daily_prompt, "weekly": build_weekly_prompt, "monthly": build_monthly_prompt}
+
+
+# --------------------------------------------------------------------------- parse / merge
 def _parse_json(text: str) -> dict:
     """Parse the model's reply into a dict, tolerating ```json fences or surrounding prose."""
     t = text.strip()
@@ -94,80 +133,131 @@ def _parse_json(text: str) -> dict:
     return obj
 
 
-def _merge(skel: dict, prev: Optional[dict], llm: dict, *, law_slugs: set, config: Config,
-           note_date: str, now_str: str) -> dict:
-    """Build a candidate record: deterministic facts from ``skel``, prose from ``llm``, prior
-    notes/edited carried from ``prev``. Never overwrites an ``edited`` field; identity is sticky."""
+def _clean(v, default: str) -> str:
+    return (v or "").strip() or default
+
+
+def _merge_tags(existing, proposed, law_slugs: set, *, mode: str, edited_has_tags: bool) -> list:
+    """daily (or any mode when the human owns tags) → add-only union; weekly/monthly auto → full
+    replace. Either way, tags no longer in the law are dropped."""
+    keep = [t for t in (existing or []) if t in law_slugs]
+    new = [t for t in (proposed or []) if t in law_slugs]
+    if mode == "daily" or edited_has_tags:
+        out = list(keep)
+        for t in new:
+            if t not in out:
+                out.append(t)
+        return out
+    out = []                                            # weekly/monthly auto: replace
+    for t in new:
+        if t not in out:
+            out.append(t)
+    return out
+
+
+def _resolve_identity(prev: dict, llm_identity, edited: dict):
+    """Identity is sticky once set and untouchable once human-edited; otherwise the agent may
+    propose one when it is blank."""
+    if "identity" in edited or prev.get("identity"):
+        return prev.get("identity")
+    return llm_identity or None
+
+
+def _parse_dt(s: Optional[str]) -> Optional[datetime.datetime]:
+    if not s:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(s)
+    except (ValueError, TypeError):
+        return None
+
+
+def _silent_over_30d(last_message_at: str, generated_at: str) -> bool:
+    a, b = _parse_dt(generated_at), _parse_dt(last_message_at)
+    return a is not None and b is not None and (a - b).total_seconds() / 86400.0 > 30
+
+
+def _carry(skel: dict, prev: Optional[dict]) -> dict:
+    """A fresh record = deterministic facts from ``skel`` + the previous agent-authored fields."""
+    rec = dict(skel)
     prev = prev or {}
-    edited = prev.get("edited") or {}
-    rec = dict(skel)  # facts + blank LLM fields
-
-    prev_identity = prev.get("identity")
-    if prev_identity:                                   # sticky once set
-        rec["identity"] = prev_identity
-    elif "identity" not in edited:                      # propose only when blank + not user-owned
-        rec["identity"] = llm.get("identity") or None
-
-    rec["summary"] = (llm.get("summary") or None)
-    rec["reply_reason"] = ((llm.get("reply_reason") or None) if rec.get("needs_reply") else None)
-
-    note = {"date": note_date, "text": (llm.get("daily_note") or "").strip() or "(no note)"}
-    rec["daily"] = (list(prev.get("daily") or []) + [note])[-config.daily_cap:]
-
-    rec["weekly"] = list(prev.get("weekly") or [])      # daily mode does not touch these
-    rec["monthly"] = prev.get("monthly")
-    rec["history"] = list(prev.get("history") or [])
-    rec["edited"] = edited
-
-    rec["tags"] = [t for t in (llm.get("tags") or []) if t in law_slugs]
-    rec["last_updated"] = now_str
+    for f in _CARRY:
+        if f in prev:
+            rec[f] = prev[f]
     return rec
 
 
-def _validate_record(rec: dict, *, law_slugs: set, config: Config) -> Conversation:
-    return Conversation.model_validate(
-        rec, context={"law": law_slugs, "daily_cap": config.daily_cap, "weekly_cap": config.weekly_cap}
-    )
+def _apply(mode: str, skel: dict, prev: Optional[dict], llm: dict, *, law_slugs: set,
+           generated_at: str, note_date: str, now_str: str) -> dict:
+    prev = prev or {}
+    edited = prev.get("edited") or {}
+    rec = _carry(skel, prev)
+    rec["last_updated"] = now_str
+    has_tags = "tags" in edited
+
+    if mode == "daily":
+        rec["daily"] = list(rec.get("daily") or []) + [
+            {"date": note_date, "text": _clean(llm.get("daily_note"), "(no note)")}]
+        rec["tags"] = _merge_tags(rec.get("tags"), llm.get("tags"), law_slugs,
+                                  mode="daily", edited_has_tags=has_tags)
+        rec["texts_today"] = []                          # daily reads then clears it
+    elif mode == "weekly":
+        rec["weekly"] = list(rec.get("weekly") or []) + [
+            {"week_of": note_date, "text": _clean(llm.get("weekly_note"), "(no note)")}]
+        rec["daily"] = []                                # weekly clears daily
+        rec["identity"] = _resolve_identity(prev, llm.get("identity"), edited)
+        rec["tags"] = _merge_tags(rec.get("tags"), llm.get("tags"), law_slugs,
+                                  mode="weekly", edited_has_tags=has_tags)
+    elif mode == "monthly":
+        rec["monthly"] = llm.get("monthly") or None
+        rec["history"] = list(rec.get("history") or []) + [
+            {"date": note_date, "text": _clean(llm.get("history_line"), "not enough context")}]
+        rec["weekly"], rec["daily"] = [], []             # monthly clears both
+        rec["identity"] = _resolve_identity(prev, llm.get("identity"), edited)
+        rec["tags"] = _merge_tags(rec.get("tags"), llm.get("tags"), law_slugs,
+                                  mode="monthly", edited_has_tags=has_tags)
+        rec["status"] = "dormant" if _silent_over_30d(rec["last_message_at"], generated_at) else "active"
+    return rec
 
 
-def _summarize_one(skel: dict, raw: list, prev: Optional[dict], *, engine: Engine, config: Config,
-                   law: dict, law_slugs: set, note_date: str, now_str: str) -> Conversation:
-    prompt = build_daily_prompt(skel, raw, prev=prev, law=law)
+def _validate_record(rec: dict, *, law_slugs: set) -> Conversation:
+    return Conversation.model_validate(rec, context={"law": law_slugs})
+
+
+def _run_one(mode, skel, raw, prev, *, engine, config, law, law_slugs, generated_at, note_date,
+             now_str, agents_dir) -> Conversation:
+    builder = _BUILDERS[mode]
+    model = getattr(config.models, mode)
+    prompt = builder(skel, raw, prev=prev, law=law, agents_dir=agents_dir)
     last_err: Optional[Exception] = None
     for _ in range(2):
         try:
-            text = engine.summarize(prompt, model=config.models.daily)
+            text = engine.summarize(prompt, model=model)
             llm = _parse_json(text)
-            rec = _merge(skel, prev, llm, law_slugs=law_slugs, config=config,
+            rec = _apply(mode, skel, prev, llm, law_slugs=law_slugs, generated_at=generated_at,
                          note_date=note_date, now_str=now_str)
-            return _validate_record(rec, law_slugs=law_slugs, config=config)
-        except Exception as e:  # parse / validation / engine failure -> correct and retry
+            return _validate_record(rec, law_slugs=law_slugs)
+        except Exception as e:
             last_err = e
-            prompt = (build_daily_prompt(skel, raw, prev=prev, law=law)
+            prompt = (builder(skel, raw, prev=prev, law=law, agents_dir=agents_dir)
                       + f"\n\nYour previous reply was rejected: {e}\nReturn ONLY valid JSON in the exact shape.")
-    log.warning("daily summary for chat_rowid=%s failed twice (%s); keeping deterministic skeleton",
-                skel.get("chat_rowid"), last_err)
-    return _validate_record(skel, law_slugs=law_slugs, config=config)  # facts only, prose blank
+    log.warning("%s summary for chat_rowid=%s failed twice (%s); keeping the prior record",
+                mode, skel.get("chat_rowid"), last_err)
+    return _validate_record(_carry(skel, prev), law_slugs=law_slugs)   # facts refreshed, prose kept
 
 
-def summarize_daily(export: dict, *, engine: Engine, config: Optional[Config] = None,
-                    prev_state: Optional[Union[State, dict]] = None, law: Optional[dict] = None,
-                    generated_at: Optional[str] = None, limit: Optional[int] = None) -> State:
-    """Produce a fresh, validated :class:`State` from ``export`` and the previous state.
-
-    Calls ``engine`` once (plus at most one retry) per conversation **with new messages**;
-    conversations present only in ``prev_state`` are carried forward untouched. ``law`` is the active
-    tag law (``{slug: description}``); when omitted it is loaded from ``watch.md``. ``limit`` is a
-    cost cap: only the first ``limit`` conversations (the export is recency-sorted) get the LLM pass;
-    the rest are emitted untouched (their previous record, or a deterministic skeleton) with no call.
-    """
+# --------------------------------------------------------------------------- the agents
+def _summarize(mode: str, export: dict, *, engine: Engine, config: Optional[Config] = None,
+               prev_state: Optional[Union[State, dict]] = None, law: Optional[dict] = None,
+               generated_at: Optional[str] = None, limit: Optional[int] = None,
+               agents_dir=None) -> State:
     if config is None:
         config = Config()
     if law is None:
         law = load_law()
     law_slugs = set(law)
 
-    sk = build_skeleton(export, config=config).model_dump()
+    sk = build_skeleton(export, generated_at=generated_at).model_dump()
     generated_at = generated_at or sk["generated_at"]
     note_date, now_str = generated_at[:10], generated_at
 
@@ -178,78 +268,101 @@ def summarize_daily(export: dict, *, engine: Engine, config: Optional[Config] = 
     out, seen = [], set()
     for idx, skel in enumerate(sk["conversations"]):
         cid = skel["chat_rowid"]
-        if limit is not None and idx >= limit:           # cost cap: no LLM call beyond the limit
+        if limit is not None and idx >= limit:                  # cost cap: no LLM call beyond limit
             prev = prev_by_id.get(cid)
-            out.append(prev if prev else
-                       _validate_record(skel, law_slugs=law_slugs, config=config).model_dump())
+            out.append(prev if prev else dict(skel))
             seen.add(cid)
             continue
-        rec = _summarize_one(skel, raw_by_id.get(cid, []), prev_by_id.get(cid),
-                             engine=engine, config=config, law=law, law_slugs=law_slugs,
-                             note_date=note_date, now_str=now_str)
+        rec = _run_one(mode, skel, raw_by_id.get(cid, []), prev_by_id.get(cid), engine=engine,
+                       config=config, law=law, law_slugs=law_slugs, generated_at=generated_at,
+                       note_date=note_date, now_str=now_str, agents_dir=agents_dir)
         out.append(rec.model_dump())
         seen.add(cid)
 
-    for cid, prec in prev_by_id.items():               # carry forward idle conversations
+    for cid, prec in prev_by_id.items():                        # carry forward idle conversations
         if cid not in seen:
+            prec = dict(prec)
+            prec["tags"] = [t for t in (prec.get("tags") or []) if t in law_slugs]   # self-heal law edits
             out.append(prec)
 
+    # daily (incremental/since) carries the prior unresponded list; weekly/monthly recompute it.
+    unresponded = (prev_dict.get("unresponded", []) or sk["unresponded"]) if mode == "daily" else sk["unresponded"]
     state = {
         "generated_at": generated_at,
-        "watermark": sk["watermark"],
-        "unresponded": sk["unresponded"],
+        "watermark": _max_watermark(sk["watermark"], prev_dict.get("watermark")),
+        "unresponded": unresponded,
         "conversations": out,
     }
-    return validate_state(state, law=law_slugs, daily_cap=config.daily_cap, weekly_cap=config.weekly_cap)
+    return validate_state(state, law=law_slugs)
 
 
+def _max_watermark(new: dict, prev: Optional[dict]) -> dict:
+    if not prev:
+        return new
+    if (new["max_date_raw"], new["max_message_rowid"]) < (prev["max_date_raw"], prev["max_message_rowid"]):
+        return prev
+    return new
+
+
+def summarize_daily(export, **kw) -> State:
+    return _summarize("daily", export, **kw)
+
+
+def summarize_weekly(export, **kw) -> State:
+    return _summarize("weekly", export, **kw)
+
+
+def summarize_monthly(export, **kw) -> State:
+    return _summarize("monthly", export, **kw)
+
+
+# --------------------------------------------------------------------------------- CLI
 def main(argv: Optional[Sequence[str]] = None, *, engine: Optional[Engine] = None) -> int:
-    """``text-triage summarize`` — extract a window, run the daily LLM summary, write state.json.
-
-    Reuses the existing state file (``--out``, if present) as the previous state so re-derives fold
-    in. ``engine`` is injectable for tests; in production it is built from ``engine.provider``.
-    """
+    """``text-triage summarize --mode {daily,weekly,monthly}`` — extract the mode's window, run that
+    agent, write/update state.json. Reuses an existing ``--out`` file as the previous state."""
     import argparse
 
     from text_triage.config import load_config
     from text_triage.engine import make_engine
     from text_triage.extract import ADDRESSBOOK_DIR, CHAT_DB, extract
     from text_triage.state_io import read_state, write_state
-    from text_triage.tags import active_slugs, load_law
 
     p = argparse.ArgumentParser(
         prog="text-triage summarize",
-        description="Daily LLM summary of recent iMessages into a validated state.json.",
+        description="Run a daily/weekly/monthly summary agent into a validated state.json.",
     )
-    g = p.add_mutually_exclusive_group(required=True)
-    g.add_argument("--window", choices=["weekly", "monthly"],
-                   help="window days come from conditions.yaml weekly_days/monthly_days")
-    g.add_argument("--since", help="ISO datetime; incremental summary since this moment")
+    p.add_argument("--mode", choices=["daily", "weekly", "monthly"], default="daily")
+    p.add_argument("--since", help="ISO datetime override for daily's incremental window")
     p.add_argument("--out", help="state.json to write/update (default: stdout)")
     p.add_argument("--db", default=CHAT_DB, help="path to chat.db")
     p.add_argument("--addressbook", default=ADDRESSBOOK_DIR, help="AddressBook dir for contacts")
     p.add_argument("--config", help="path to conditions.yaml (default: auto-discover)")
     p.add_argument("--watch", help="path to watch.md tag scratchpad (default: auto-discover)")
     p.add_argument("--limit", type=int,
-                   help="cost cap: only summarize the N most-recent conversations (rest left untouched)")
+                   help="cost cap: only summarize the N most-recent conversations")
     args = p.parse_args(argv)
 
     config = load_config(args.config)
     law = load_law(args.watch)
-    caps = {"law": active_slugs(law), "daily_cap": config.daily_cap, "weekly_cap": config.weekly_cap}
     if engine is None:
         engine = make_engine(config)
 
-    export = extract(db_path=args.db, addressbook_dir=args.addressbook,
-                     window=args.window, since=args.since, config=config)
-    prev = read_state(args.out, **caps) if args.out and Path(args.out).exists() else None
-    state = summarize_daily(export, engine=engine, config=config, prev_state=prev, law=law,
-                            limit=args.limit)
+    if args.mode == "monthly":
+        export = extract(db_path=args.db, addressbook_dir=args.addressbook, window="monthly", config=config)
+    elif args.mode == "weekly":
+        export = extract(db_path=args.db, addressbook_dir=args.addressbook, window="weekly", config=config)
+    else:  # daily: the messages since last run (Step-0 stand-in for the watcher's texts_today)
+        since = args.since or (datetime.datetime.now() - datetime.timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+        export = extract(db_path=args.db, addressbook_dir=args.addressbook, since=since, config=config)
+
+    prev = read_state(args.out, law=active_slugs(law)) if args.out and Path(args.out).exists() else None
+    fn = {"daily": summarize_daily, "weekly": summarize_weekly, "monthly": summarize_monthly}[args.mode]
+    state = fn(export, engine=engine, config=config, prev_state=prev, law=law, limit=args.limit)
 
     if args.out:
-        write_state(state, args.out, **caps)
-        n_sum = sum(1 for c in state.conversations if c.summary is not None)
-        print(f"Wrote {args.out}: {n_sum} summarized / {len(state.conversations)} conversations")
+        write_state(state, args.out, law=active_slugs(law))
+        n = sum(1 for c in state.conversations if c.daily or c.weekly or c.monthly or c.identity)
+        print(f"Wrote {args.out} [{args.mode}]: {n} enriched / {len(state.conversations)} conversations")
     else:
         print(state.model_dump_json(indent=2))
     return 0
