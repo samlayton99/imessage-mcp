@@ -9,15 +9,20 @@ This is a **sandbox artifact, not a real bug** — on a normal Mac terminal (`uv
 install`) the venv persists fine. Confirmed against Claude Code docs + open issues
 (per-call shells; venv non-persistence: anthropics/claude-code#8855, #9368). **Don't "fix" the venv.**
 
-**Always run Python/tests as ONE Bash call that reinstalls first, in copy mode:**
+**Run tests as ONE Bash call that reinstalls, then PRE-IMPORTS the compiled deps before pytest:**
 
 ```bash
-export UV_LINK_MODE=copy && uv sync --reinstall >/dev/null 2>&1 && .venv/bin/python -m pytest -q
+export UV_LINK_MODE=copy && uv sync --reinstall >/dev/null 2>&1 && \
+.venv/bin/python -c "import pydantic, pydantic_core.core_schema, yaml, pytest; raise SystemExit(pytest.main(['-q']))"
 ```
 
 - `UV_LINK_MODE=copy`: uv's default clone/CoW installs come out broken here; real byte copies survive.
 - `--reinstall`: packages vanish between calls, so re-materialize them every call.
 - one call: install + use must be in the same Bash invocation (cross-call FS state is lost).
+- **pre-import, don't `-m pytest`:** files also vanish *mid-call* during pytest's slow lazy
+  collection → `ModuleNotFoundError: pydantic_core.core_schema` even after a clean reinstall.
+  Importing the compiled deps first loads them into `sys.modules`, so they survive the vanishing;
+  `pytest.main()` then runs in that same warm process. Plain `-m pytest -q` is flaky here.
 - ad-hoc scripts: `PYTHONPATH=src .venv/bin/python ...` (the editable `.pth` isn't honored either).
 - NEVER `uv cache clean` (sandbox has no reliable network to re-download → unrecoverable).
 - NEVER mix `uv pip install -e .` with `uv sync` (leaves a duplicate `.pth` that breaks imports).
