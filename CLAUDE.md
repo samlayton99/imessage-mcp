@@ -2,10 +2,12 @@
 
 ## Running tests / Python here — READ FIRST (this ate a long spiral; do not repeat it)
 
-**Root cause (finally pinned): this repo is under `~/Desktop`, which is iCloud-synced ("Desktop &
-Documents"). iCloud evicts/dehydrates large file sets, which silently guts a project-local
-`.venv/lib` — pip + site-packages vanish while `.venv/bin` is left behind. So the venv MUST live
-OUTSIDE the iCloud area.** It's a plain venv + pip (NOT uv). One-time setup, in a real Terminal:
+**Root cause — CONFIRMED, not theory.** This repo lives under `~/Desktop`, which has iCloud
+"Desktop & Documents" sync ON (`brctl status` shows the `com.apple.CloudDocs` daemon actively
+scanning and scheduling **cleanup** on `.../imessage-mcp/.venv` and `.venv/lib`). iCloud
+dehydrates/evicts those files, silently gutting a project-local `.venv` — pip + site-packages vanish
+while `.venv/bin` is left behind. So the venv MUST live OUTSIDE the iCloud tree (`~/Desktop`,
+`~/Documents`). It's a plain venv + pip — **NOT uv** (see below). One-time setup, in a real Terminal:
 
 ```bash
 mkdir -p ~/.venvs && python3 -m venv ~/.venvs/text-triage
@@ -16,6 +18,12 @@ cd <repo> && ~/.venvs/text-triage/bin/python -m pytest -q     # 116 tests, ~1s
 The venv lives at `~/.venvs/text-triage` (out of iCloud's reach); the code stays in the repo. pytest
 finds the source via `pythonpath=["src"]` (pyproject) — the package is deliberately NOT installed
 (avoids `.pth` pain). Ad-hoc scripts (human runs): `PYTHONPATH=src ~/.venvs/text-triage/bin/python ...`.
+
+**Why not uv (decided):** the failure was the venv's *location* (iCloud), not the tool. uv defaults
+to a project-local `.venv` — straight back into the iCloud trap — and earlier added its own friction
+(editable `.pth` hook, link modes). Plain external venv + pip is working, conservative, tool-agnostic.
+`pyproject.toml` stays (standard; drives `pythonpath`); `uv.lock` is left as a harmless artifact for
+forkers, but the dev loop does not use uv.
 
 **The agent CANNOT run the suite itself — the human runs it and pastes the result.** The agent's
 sandboxed Bash can't see `.venv/lib/.../site-packages` (even sandbox-off; reports `No such file or
