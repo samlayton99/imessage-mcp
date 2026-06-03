@@ -24,7 +24,7 @@ from typing import Optional, Sequence, Union
 
 from text_triage.config import Config
 from text_triage.engine import Engine
-from text_triage.schema import Conversation, State, ValidationError, validate_state
+from text_triage.schema import Conversation, State, validate_state
 from text_triage.skeleton import build_skeleton
 from text_triage.tags import load_law
 
@@ -152,12 +152,14 @@ def _summarize_one(skel: dict, raw: list, prev: Optional[dict], *, engine: Engin
 
 def summarize_daily(export: dict, *, engine: Engine, config: Optional[Config] = None,
                     prev_state: Optional[Union[State, dict]] = None, law: Optional[dict] = None,
-                    generated_at: Optional[str] = None) -> State:
+                    generated_at: Optional[str] = None, limit: Optional[int] = None) -> State:
     """Produce a fresh, validated :class:`State` from ``export`` and the previous state.
 
     Calls ``engine`` once (plus at most one retry) per conversation **with new messages**;
     conversations present only in ``prev_state`` are carried forward untouched. ``law`` is the active
-    tag law (``{slug: description}``); when omitted it is loaded from ``watch.md``.
+    tag law (``{slug: description}``); when omitted it is loaded from ``watch.md``. ``limit`` is a
+    cost cap: only the first ``limit`` conversations (the export is recency-sorted) get the LLM pass;
+    the rest are emitted untouched (their previous record, or a deterministic skeleton) with no call.
     """
     if config is None:
         config = Config()
@@ -174,8 +176,14 @@ def summarize_daily(export: dict, *, engine: Engine, config: Optional[Config] = 
     prev_by_id = {c["chat_rowid"]: c for c in prev_dict.get("conversations", [])}
 
     out, seen = [], set()
-    for skel in sk["conversations"]:
+    for idx, skel in enumerate(sk["conversations"]):
         cid = skel["chat_rowid"]
+        if limit is not None and idx >= limit:           # cost cap: no LLM call beyond the limit
+            prev = prev_by_id.get(cid)
+            out.append(prev if prev else
+                       _validate_record(skel, law_slugs=law_slugs, config=config).model_dump())
+            seen.add(cid)
+            continue
         rec = _summarize_one(skel, raw_by_id.get(cid, []), prev_by_id.get(cid),
                              engine=engine, config=config, law=law, law_slugs=law_slugs,
                              note_date=note_date, now_str=now_str)
@@ -222,6 +230,8 @@ def main(argv: Optional[Sequence[str]] = None, *, engine: Optional[Engine] = Non
     p.add_argument("--addressbook", default=ADDRESSBOOK_DIR, help="AddressBook dir for contacts")
     p.add_argument("--config", help="path to conditions.yaml (default: auto-discover)")
     p.add_argument("--watch", help="path to watch.md tag scratchpad (default: auto-discover)")
+    p.add_argument("--limit", type=int,
+                   help="cost cap: only summarize the N most-recent conversations (rest left untouched)")
     args = p.parse_args(argv)
 
     config = load_config(args.config)
@@ -233,11 +243,13 @@ def main(argv: Optional[Sequence[str]] = None, *, engine: Optional[Engine] = Non
     export = extract(db_path=args.db, addressbook_dir=args.addressbook,
                      window=args.window, since=args.since, config=config)
     prev = read_state(args.out, **caps) if args.out and Path(args.out).exists() else None
-    state = summarize_daily(export, engine=engine, config=config, prev_state=prev, law=law)
+    state = summarize_daily(export, engine=engine, config=config, prev_state=prev, law=law,
+                            limit=args.limit)
 
     if args.out:
         write_state(state, args.out, **caps)
-        print(f"Wrote {args.out}: {len(state.conversations)} conversations summarized")
+        n_sum = sum(1 for c in state.conversations if c.summary is not None)
+        print(f"Wrote {args.out}: {n_sum} summarized / {len(state.conversations)} conversations")
     else:
         print(state.model_dump_json(indent=2))
     return 0

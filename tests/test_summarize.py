@@ -149,6 +149,29 @@ def test_daily_notes_trimmed_to_cap():
     assert dates[-1] == "2026-06-02"             # newest appended
 
 
+def test_limit_only_summarizes_top_n():
+    convs = [conv(chat_rowid=1, name="A", handle="+15550000001"),
+             conv(chat_rowid=2, name="B", handle="+15550000002"),
+             conv(chat_rowid=3, name="C", handle="+15550000003")]
+    eng = StubEngine([good()])  # exactly one response -> proves the engine is called only once
+    s = summarize_daily(export_with(convs), engine=eng, config=Config(), law=LAW, limit=1)
+    assert len(eng.calls) == 1
+    assert len(s.conversations) == 3                       # all emitted, only the top one summarized
+    assert s.conversations[0].summary == "They asked to meet Thursday."
+    assert s.conversations[1].summary is None and s.conversations[2].summary is None
+
+
+def test_limit_beyond_window_carries_prev_summary():
+    prev = {"conversations": [{**valid_prev_record(chat_rowid=2, name="B", handle="+15550000002"),
+                               "summary": "Older carried summary."}]}
+    convs = [conv(chat_rowid=1, name="A", handle="+15550000001"),
+             conv(chat_rowid=2, name="B", handle="+15550000002")]
+    s = summarize_daily(export_with(convs), engine=StubEngine([good()]), config=Config(),
+                        prev_state=prev, law=LAW, limit=1)
+    beyond = next(c for c in s.conversations if c.chat_rowid == 2)
+    assert beyond.summary == "Older carried summary."      # not wiped, not re-summarized
+
+
 # --------------------------------------------------------------------- CLI (`summarize` subcommand)
 def _recent_db_date(days_ago):
     """Apple-ns timestamp `days_ago` before *now*, so the message always lands inside the window
@@ -186,6 +209,24 @@ def test_cli_summarize_writes_validated_state(tmp_path, chatdb_factory):
     assert c["summary"] == "They asked to meet Thursday."
     assert c["tags"] == ["needs-scheduling"]
     assert c["needs_reply"] is True and c["reply_reason"]
+
+
+def test_cli_limit_caps_engine_calls(tmp_path, chatdb_factory):
+    from text_triage import summarize as S
+    cfg, watch, spec = _cli_setup(tmp_path)
+    spec2 = {"identifier": "+15550000202", "display_name": None, "handles": ["+15550000202"],
+             "messages": [{"date": _recent_db_date(2), "from_me": False,
+                           "handle": "+15550000202", "text": "you free sunday?"}]}
+    chatdb_factory(tmp_path / "chat.db", [spec, spec2])
+    out = tmp_path / "state.json"
+    eng = StubEngine([good()])  # one response; --limit 1 must not ask for a second
+    rc = S.main(_cli_args(tmp_path, out) + ["--limit", "1", "--config", str(cfg), "--watch", str(watch)],
+                engine=eng)
+    assert rc == 0
+    assert len(eng.calls) == 1
+    data = json.loads(out.read_text())
+    assert len(data["conversations"]) == 2
+    assert sum(1 for c in data["conversations"] if c["summary"]) == 1
 
 
 def test_cli_rerun_reads_prev_state_and_appends_a_note(tmp_path, chatdb_factory):
