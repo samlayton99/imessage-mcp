@@ -45,11 +45,14 @@ independent of the repo's `conditions.yaml` and `watch.md` — never depend on t
 ## Project shape
 `src/text_triage/`: `extract` (chat.db → JSON) · `schema` (Pydantic state.json contract; no rolling
 `summary`, no list caps, `texts_today` on each record) · `state_io` (atomic write+lock) · `skeleton`
-(deterministic facts) · `config` (conditions.yaml) · `tags` (watch.md → tag law with lifetimes +
-`effective_tags`) · `engine` (async model-call seam; `api_key` default / `agent_sdk` optional, NOT
-full Claude Code — being rebuilt from the slow `claude -p`; see PLAN "Engine") · `summarize`
-(daily/weekly/monthly agents: assemble → validate → one retry → never land invalid) · `cli`
-(`extract`/`summarize --mode`). Two steering files: `conditions.yaml` (knobs) + `watch.md` (tag
-scratchpad). Real exports / `state.json` / secrets / the handoff bundle are gitignored; only PII-free
-synthetic fixtures are committed. Design + status + decision log: the handoff `PLAN.md` / `CONTEXT.md`
-(gitignored).
+(deterministic facts) · `config` (conditions.yaml → `messages`/`engine`/`vps`; secrets in `.env`) ·
+`tags` (watch.md → tag law with lifetimes + `effective_tags`) · `engine` (async model-call seam;
+`litellm` default = any provider via API key / `agent_sdk` optional = Claude Max; `StubEngine` for
+tests) · `prompts` + `agents/*.md` (each call = system [shared `_global` frame + per-agent role] +
+user [per-conversation data]) · `summarize` (daily/weekly/monthly agents, async + parallel; assemble →
+validate → one retry → never land invalid; `build_contexts` / `--show-context` dry-run) · `cli`
+(`extract` / `summarize --mode`; loads `.env`). Steering: `conditions.yaml` (knobs) + `watch.md`
+(tags) + `agents/*.md` (prompts); secrets in `.env`. Real exports / `state.json` / secrets / the
+handoff bundle are gitignored; only PII-free synthetic fixtures are committed. Design + status +
+decision log: the handoff `PLAN.md` / `CONTEXT.md` (gitignored; **refresh pending** for the litellm
+engine + config contract + prompt split).

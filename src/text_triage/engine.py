@@ -1,6 +1,6 @@
 """The model-call seam (PLAN "Engine"): one async interface, two real backends.
 
-``await Engine.summarize(prompt, *, model) -> str`` returns the model's raw text. ``summarize.py``
+``await Engine.summarize(system, user, *, model) -> str`` returns the model's raw text. ``summarize.py``
 owns prompt assembly + schema validation; the engine only runs the model. The whole summarizer stays
 testable with a :class:`StubEngine` (no LLM, no network), and the backend is a ``conditions.yaml``
 choice (``engine.provider``):
@@ -28,8 +28,8 @@ class EngineError(RuntimeError):
 
 @runtime_checkable
 class Engine(Protocol):
-    async def summarize(self, prompt: str, *, model: str) -> str:
-        """Run ``model`` on ``prompt`` and return its raw text output."""
+    async def summarize(self, system: str, user: str, *, model: str) -> str:
+        """Run ``model`` on the (system, user) prompt pair and return its raw text output."""
         ...
 
 
@@ -41,10 +41,10 @@ class StubEngine:
     def __init__(self, responses: Union[str, List[object]]):
         self._const = responses if isinstance(responses, str) else None
         self._queue = None if isinstance(responses, str) else list(responses)
-        self.calls: List[Tuple[str, str]] = []
+        self.calls: List[Tuple[str, str, str]] = []
 
-    async def summarize(self, prompt: str, *, model: str) -> str:
-        self.calls.append((prompt, model))
+    async def summarize(self, system: str, user: str, *, model: str) -> str:
+        self.calls.append((system, user, model))
         if self._const is not None:
             return self._const
         if not self._queue:
@@ -66,7 +66,7 @@ class LiteLLMEngine:
         self._max_tokens = max_tokens
         self._num_retries = num_retries
 
-    async def summarize(self, prompt: str, *, model: str) -> str:
+    async def summarize(self, system: str, user: str, *, model: str) -> str:
         acompletion = self._acompletion
         if acompletion is None:
             try:
@@ -76,7 +76,8 @@ class LiteLLMEngine:
             acompletion = litellm.acompletion
         resp = await acompletion(
             model=model,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "system", "content": system},
+                      {"role": "user", "content": user}],
             max_tokens=self._max_tokens,
             num_retries=self._num_retries,
         )
@@ -93,15 +94,16 @@ class AgentSdkEngine:
     def __init__(self, *, max_turns: int = 1):
         self._max_turns = max_turns
 
-    async def summarize(self, prompt: str, *, model: str) -> str:
+    async def summarize(self, system: str, user: str, *, model: str) -> str:
         # VERIFY: option flags + message/text extraction against the installed claude_agent_sdk.
         try:
             from claude_agent_sdk import ClaudeAgentOptions, query
         except ImportError as e:
             raise EngineError("engine.provider 'agent_sdk' needs `pip install claude-agent-sdk`") from e
-        options = ClaudeAgentOptions(model=model, allowed_tools=[], max_turns=self._max_turns)
+        options = ClaudeAgentOptions(system_prompt=system, model=model, allowed_tools=[],
+                                     max_turns=self._max_turns)
         parts: List[str] = []
-        async for message in query(prompt=prompt, options=options):
+        async for message in query(prompt=user, options=options):
             for block in getattr(message, "content", None) or []:
                 text = getattr(block, "text", None)
                 if isinstance(text, str):

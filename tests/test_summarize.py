@@ -7,7 +7,8 @@ import json
 from text_triage.config import Config
 from text_triage.engine import StubEngine
 from text_triage.schema import State
-from text_triage.summarize import (build_daily_prompt, summarize_daily, summarize_monthly,
+from text_triage.summarize import (build_contexts, build_daily_prompt, build_monthly_prompt,
+                                    build_weekly_prompt, summarize_daily, summarize_monthly,
                                     summarize_weekly)
 from text_triage.tags import TagSpec
 
@@ -95,13 +96,49 @@ def test_daily_carries_prev_monthly_and_history():
     assert c.monthly == "prev monthly" and [h.text for h in c.history] == ["h"]
 
 
-def test_daily_prompt_has_raw_identity_law_lifetimes_and_voice():
-    p = build_daily_prompt({"name": "Avery Quinn", "is_group": False}, [msg(text="meet thursday?")],
-                           prev={"identity": "A friend.", "monthly": "m", "weekly": [], "daily": [],
-                                 "history": []}, law=LAW)
-    assert "meet thursday" in p and "Avery Quinn" in p and "A friend." in p
-    assert "needs-scheduling (ttl 14d)" in p and "family (sticky)" in p
-    assert "assume" in p.lower()
+def test_daily_prompt_splits_system_frame_and_user_data():
+    system, user = build_daily_prompt({"name": "Avery Quinn", "is_group": False},
+                                      [msg(text="meet thursday?")],
+                                      prev={"identity": "A friend.", "monthly": "m", "weekly": [],
+                                            "daily": [], "history": []}, law=LAW)
+    # global frame + role + the tag law live in the SYSTEM prompt
+    assert "needs-scheduling (ttl 14d)" in system and "family (sticky)" in system
+    assert "assume" in system.lower() and "DAILY" in system
+    # this one conversation's data lives in the USER prompt
+    assert "Avery Quinn" in user and "A friend." in user and "meet thursday" in user
+
+
+def test_weekly_user_omits_daily_layer():
+    _, user = build_weekly_prompt(
+        {"name": "X", "is_group": False}, [msg()],
+        prev={"identity": "i", "monthly": "m", "weekly": [{"week_of": "2026-05-26", "text": "W"}],
+              "daily": [{"date": "2026-06-01", "text": "DAILYLEAK"}], "history": []}, law=LAW)
+    assert "DAILYLEAK" not in user                      # weekly never sees daily notes
+
+
+def test_monthly_user_omits_weekly_and_daily_layers():
+    _, user = build_monthly_prompt(
+        {"name": "X", "is_group": False}, [msg()],
+        prev={"identity": "i", "monthly": "m", "weekly": [{"week_of": "w", "text": "WEEKLYLEAK"}],
+              "daily": [{"date": "2026-06-01", "text": "DAILYLEAK"}], "history": []}, law=LAW)
+    assert "WEEKLYLEAK" not in user and "DAILYLEAK" not in user
+
+
+def test_build_contexts_returns_per_conversation_system_user_model():
+    ctxs = build_contexts("daily", export_with([conv()]), config=Config(), law=LAW)
+    assert len(ctxs) == 1
+    c = ctxs[0]
+    assert c["chat_rowid"] == 1 and "Avery Quinn" in c["user"] and "DAILY" in c["system"]
+    assert c["model"] == Config().engine.models.daily and c["est_tokens"] > 0
+
+
+def test_max_raw_messages_caps_what_enters_the_prompt():
+    msgs = [msg(rowid=i, text=f"m{i}") for i in range(5)]
+    cfg = Config(engine={"max_raw_messages": {"monthly": 2}})
+    ctxs = build_contexts("monthly", export_with([conv(messages=msgs)]), config=cfg, law=LAW)
+    user = ctxs[0]["user"]
+    assert "m4" in user and "m3" in user                # newest 2 kept (oldest-first slice)
+    assert "m0" not in user and "m2" not in user
 
 
 def test_carried_tag_not_in_law_is_dropped():
@@ -251,3 +288,20 @@ def test_cli_daily_dispatch_writes_a_note(tmp_path, chatdb_factory):
     assert rc == 0
     convs = json.loads(out.read_text())["conversations"]
     assert convs and convs[0]["daily"][0]["text"] == "Asked to meet Thursday."
+
+
+def test_cli_show_context_prints_prompts_and_makes_no_engine_call(tmp_path, chatdb_factory, capsys):
+    from text_triage import summarize as S
+    cfg, watch = _cli(tmp_path)
+    spec = {"identifier": "+15550000201", "display_name": None, "handles": ["+15550000201"],
+            "messages": [{"date": _recent_db_date(3), "from_me": False,
+                          "handle": "+15550000201", "text": "meet thursday?"}]}
+    chatdb_factory(tmp_path / "chat.db", [spec])
+    eng = StubEngine([])  # must NOT be consumed
+    rc = S.main(["--mode", "monthly", "--show-context", "--db", str(tmp_path / "chat.db"),
+                 "--addressbook", str(tmp_path / "ab"), "--config", str(cfg), "--watch", str(watch)],
+                engine=eng)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "--- SYSTEM ---" in out and "--- USER ---" in out and "meet thursday" in out
+    assert eng.calls == []   # no LLM call was made

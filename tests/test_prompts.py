@@ -1,10 +1,12 @@
-"""prompts.render fills agents/<mode>.md templates via ${placeholder} substitution. Prompt content
-lives in the markdown files, not in code."""
+"""prompts.py builds each call's (system, user) from agents/*.md. system = _global.md (the shared
+frame, with ${law}) + <mode>.md (role); user = <mode>.user.md (this conversation's data). Prompt
+content lives in the markdown files, not in code."""
 import pytest
 
-from text_triage.prompts import render
+from text_triage.prompts import build_system, build_user, render
 
 
+# ---- render (low-level) ------------------------------------------------------
 def test_render_substitutes_placeholders_and_leaves_braces(tmp_path):
     (tmp_path / "x.md").write_text("Hello ${who}, you have ${n} messages.\n{literal braces stay}")
     out = render("x", {"who": "Sam", "n": 3}, agents_dir=tmp_path)
@@ -23,24 +25,37 @@ def test_render_missing_template_raises(tmp_path):
         render("nope", {}, agents_dir=tmp_path)
 
 
-def test_golden_rule_is_auto_injected(tmp_path):
-    (tmp_path / "_golden_rule.md").write_text("NEVER ASSUME.\n")
-    (tmp_path / "d.md").write_text("Rule: ${golden_rule}\nBody ${x}")
-    out = render("d", {"x": "hi"}, agents_dir=tmp_path)            # not passed in mapping
-    assert "Rule: NEVER ASSUME." in out and "Body hi" in out
+def test_render_reads_compound_stem(tmp_path):
+    (tmp_path / "daily.user.md").write_text("data for ${who}")
+    assert render("daily.user", {"who": "X"}, agents_dir=tmp_path) == "data for X"
 
 
-def test_committed_daily_template_renders_with_build_keys():
-    # the shipped agents/daily.md must render with exactly the keys build_daily_prompt supplies
-    out = render("daily", {"name": "X", "kind": "1:1", "identity": "i", "monthly": "m",
-                           "weekly": "  (none)", "daily": "  (none)", "history": "  (none)",
-                           "law": "  - family (sticky): kin", "messages": "  [t] X: hi"})
-    assert "X (1:1)" in out and "family (sticky): kin" in out and "hi" in out
-    assert "assume" in out.lower()        # the shared golden rule is injected into the daily prompt
+# ---- build_system: shared global frame + per-agent role (committed templates) -
+def test_build_system_has_global_frame_law_and_role():
+    sysp = build_system("daily", law="  - family (sticky): kin")
+    assert "memory-keeper" in sysp                       # mission (global)
+    assert "GOLDEN RULE" in sysp and "assume" in sysp.lower()   # golden rule (global)
+    assert "family (sticky): kin" in sysp                # law injected into system
+    assert "JSON" in sysp                                # output-format contract (global)
+    assert "DAILY" in sysp                               # the per-agent role
 
 
-def test_committed_weekly_and_monthly_templates_render():
-    keys = {"name": "X", "kind": "1:1", "identity": "i", "monthly": "m",
-            "history": "  (none)", "law": "  - family (sticky): kin", "messages": "  [t] X: hi"}
-    assert "X (1:1)" in render("weekly", keys) and "assume" in render("weekly", keys).lower()
-    assert "X (1:1)" in render("monthly", keys) and "assume" in render("monthly", keys).lower()
+def test_build_system_global_frame_is_identical_across_agents():
+    a = build_system("daily", law="  - x (sticky): y")
+    b = build_system("weekly", law="  - x (sticky): y")
+    glob_a = a.rsplit("Your role:", 1)[0]                # everything before the role section
+    glob_b = b.rsplit("Your role:", 1)[0]
+    assert glob_a == glob_b and "memory-keeper" in glob_a   # the shared frame is byte-identical
+
+
+def test_build_system_renders_all_three_committed_roles():
+    for mode in ("daily", "weekly", "monthly"):
+        assert "memory-keeper" in build_system(mode, law="  - family (sticky): kin")
+
+
+# ---- build_user: per-conversation data --------------------------------------
+def test_build_user_daily_has_name_count_and_messages():
+    user = build_user("daily", {"name": "Avery", "kind": "1:1", "identity": "i", "monthly": "m",
+                                "weekly": "(none)", "daily": "(none)", "history": "(none)",
+                                "msg_count": 1, "messages": "  [t] Avery: hi"})
+    assert "Avery (1:1)" in user and "hi" in user and "1 message" in user
