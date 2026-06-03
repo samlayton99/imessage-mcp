@@ -26,6 +26,19 @@ def test_dispatches_extract_subcommand(tmp_path, chatdb_factory):
     assert json.loads(out.read_text())["window"] == "monthly"
 
 
+def test_dispatches_summarize_subcommand(monkeypatch):
+    import text_triage.summarize as S
+    seen = {}
+
+    def fake_main(argv):
+        seen["argv"] = argv
+        return 0
+
+    monkeypatch.setattr(S, "main", fake_main)
+    assert cli.main(["summarize", "--window", "monthly", "--out", "x"]) == 0
+    assert seen["argv"] == ["--window", "monthly", "--out", "x"]
+
+
 def test_no_subcommand_returns_usage_code(capsys):
     rc = cli.main([])
     assert rc == 2

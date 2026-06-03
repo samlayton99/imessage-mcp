@@ -1,14 +1,15 @@
 """``text-triage`` console entry point — a thin subcommand dispatcher.
 
-Milestone 1 exposes one subcommand: ``extract``. The summarizer, watcher and server land as
-additional subcommands in later steps.
+Subcommands: ``extract`` (chat.db → export JSON) and ``summarize`` (export → validated state.json
+via the daily LLM pass). The watcher and server land as additional subcommands in later steps.
 """
 from __future__ import annotations
 
 import sys
 from typing import Optional, Sequence
 
-_USAGE = "usage: text-triage extract [--window {7d,30d} | --since ISO] [--out PATH] [--db PATH]"
+_USAGE = ("usage: text-triage {extract|summarize} [--window {weekly,monthly} | --since ISO] "
+          "[--out PATH] [--db PATH] [--config PATH]")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -17,6 +18,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         from text_triage.extract import main as extract_main
 
         return extract_main(args[1:])
+    if args and args[0] == "summarize":
+        from text_triage.summarize import main as summarize_main
+
+        return summarize_main(args[1:])
 
     print(_USAGE, file=sys.stderr)
     return 2
