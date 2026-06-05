@@ -106,6 +106,12 @@ class Conversation(_Base):
     last_message_at: str
     last_updated: Optional[str] = None
     needs_reply: bool = False
+    # The max message_rowid this conversation's last summary saw; the daily delta gate measures
+    # "new since last summary" against it. 0 = never summarized.
+    summarized_through: int = 0
+    # Admitted to the store but never summarized yet (rides as raw only). Set deterministically from
+    # the cursor: new_conversation == (summarized_through == 0).
+    new_conversation: bool = False
     # --- live raw layer (code-owned; watcher pushes, the daily agent reads then clears) ---
     texts_today: list[TodayMessage] = []
     # --- agent-authored (blank in a skeleton record) ---

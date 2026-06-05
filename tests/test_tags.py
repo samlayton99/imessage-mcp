@@ -3,7 +3,7 @@ and compute query-time relevance via ``effective_tags``."""
 import datetime
 from pathlib import Path
 
-from text_triage.tags import TagSpec, active_slugs, effective_tags, load_law
+from text_triage.triage.tags import TagSpec, active_slugs, effective_tags, load_law
 
 
 def write_watch(tmp_path, text):

@@ -17,7 +17,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional, Union
 
-from text_triage.schema import State, validate_state
+from text_triage.state.schema import State, validate_state
 
 __all__ = ["write_state", "read_state", "state_lock", "StateLockedError"]
 

@@ -3,11 +3,14 @@ exports/
 state.json
 state.json.lock
 *.state.lock
+# real served state.json (real contacts/messages)
+tt.json
 sample_output/
 tests/fixtures/real_export_*.json
 text-triage-handoff/
 text-triage-handoff.zip
-raw_messages.sqlite
+# raw_messages.sqlite and any local store (real message text)
+*.sqlite
 
 # Secrets — per-host, never committed
 .env

@@ -3,7 +3,7 @@ every Hardening rule from PLAN must reject a bad record and pass a good one."""
 import pytest
 from pydantic import ValidationError
 
-from text_triage.schema import State, Conversation, validate_state, is_valid_state
+from text_triage.state.schema import State, Conversation, validate_state, is_valid_state
 
 
 def valid_conv(**overrides):

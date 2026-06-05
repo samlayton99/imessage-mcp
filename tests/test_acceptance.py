@@ -17,9 +17,9 @@ from pathlib import Path
 
 import pytest
 
-from text_triage import state_io
-from text_triage.schema import ValidationError
-from text_triage.skeleton import build_skeleton, needs_reply_gate
+from text_triage.state import state_io
+from text_triage.state.schema import ValidationError
+from text_triage.triage.skeleton import build_skeleton, needs_reply_gate
 
 FIXTURES = Path(__file__).parent / "fixtures"
 

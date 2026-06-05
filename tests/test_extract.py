@@ -4,9 +4,11 @@ conditions.yaml drive the windows + conversation filter. Tested against a temp c
 Disk Access / real data is required."""
 import datetime
 import json
+import sqlite3
 
+from text_triage.collect import extract as extract_mod
 from text_triage.config import Config, Messages
-from text_triage.extract import (
+from text_triage.collect.extract import (
     MAC_EPOCH_OFFSET,
     compute_watermark,
     extract,
@@ -227,14 +229,40 @@ def test_shortcode_dropped_by_min_handle_digits(tmp_path, chatdb_factory):
     assert out["conversations"] == []
 
 
-def test_min_messages_filter(tmp_path, chatdb_factory):
+def test_spam_floor_excludes_low_total_conversations(tmp_path, chatdb_factory):
+    """The spam floor counts a conversation's ALL-TIME message total: below it the conversation never
+    enters the store; at/above it is kept."""
     conv = _one_to_one(messages=[
         {"date": dbdate(2), "from_me": False, "handle": "+15550000001", "text": "a"},
         {"date": dbdate(1), "from_me": False, "handle": "+15550000001", "text": "b"},
     ])
     chatdb_factory(tmp_path / "chat.db", [conv])
-    out = _run(tmp_path / "chat.db", tmp_path / "ab", window="monthly", config=_cfg(min_messages=3))
-    assert out["conversations"] == []
+    excluded = _run(tmp_path / "chat.db", tmp_path / "ab", window="monthly", config=_cfg(spam_floor=3))
+    assert excluded["conversations"] == []                              # 2 total < floor 3
+    kept = _run(tmp_path / "chat.db", tmp_path / "ab", window="monthly", config=_cfg(spam_floor=2))
+    assert [c["chat_rowid"] for c in kept["conversations"]] == [1]      # 2 total >= floor 2
+
+
+def test_spam_floor_counts_tapbacks(tmp_path, chatdb_factory):
+    """Tapbacks are message rows, so they count toward the spam floor total."""
+    conv = _one_to_one(messages=[
+        {"date": dbdate(2), "from_me": False, "handle": "+15550000001", "text": "hi"},
+        {"date": dbdate(1), "from_me": False, "handle": "+15550000001", "text": "x", "amt": 2000},
+    ])
+    chatdb_factory(tmp_path / "chat.db", [conv])
+    out = _run(tmp_path / "chat.db", tmp_path / "ab", window="monthly", config=_cfg(spam_floor=2))
+    assert [c["chat_rowid"] for c in out["conversations"]] == [1]       # text + tapback = 2 >= floor
+
+
+def test_chat_rowids_filters_to_requested_conversations(tmp_path, chatdb_factory):
+    """The collector backfills one conversation at a time via chat_rowids=."""
+    a = _one_to_one(handle="+15550000001",
+                    messages=[{"date": dbdate(1), "from_me": False, "handle": "+15550000001", "text": "a"}])
+    b = _one_to_one(handle="+15550000002",
+                    messages=[{"date": dbdate(1), "from_me": False, "handle": "+15550000002", "text": "b"}])
+    chatdb_factory(tmp_path / "chat.db", [a, b])                        # chat_rowids 1 and 2
+    out = _run(tmp_path / "chat.db", tmp_path / "ab", window="monthly", chat_rowids=[2])
+    assert [c["chat_rowid"] for c in out["conversations"]] == [2]
 
 
 def test_unresponded_excludes_shortcode(tmp_path, chatdb_factory):
@@ -244,6 +272,35 @@ def test_unresponded_excludes_shortcode(tmp_path, chatdb_factory):
     chatdb_factory(tmp_path / "chat.db", [conv])
     out = _run(tmp_path / "chat.db", tmp_path / "ab", window="monthly")
     assert out["unresponded"] == []  # shortcode filtered by min_handle_digits=10
+
+
+def test_recoverable_deletions_reads_recently_deleted_and_unsends(tmp_path, chatdb_factory):
+    """The deterministic deleted signal: membership in chat_recoverable_message_join (Recently Deleted)
+    or a non-zero message.date_retracted (Unsend), as {chat_rowid, message_rowid} pairs."""
+    db = tmp_path / "chat.db"
+    conv = _one_to_one(handle="+15550000001", messages=[
+        {"date": dbdate(2), "from_me": False, "handle": "+15550000001", "text": "a"},   # rowid 1
+        {"date": dbdate(1), "from_me": True, "handle": "+15550000001", "text": "b"},     # rowid 2
+    ])
+    chatdb_factory(db, [conv])
+    con = sqlite3.connect(str(db))
+    con.executescript(
+        "CREATE TABLE chat_recoverable_message_join (chat_id INTEGER, message_id INTEGER, delete_date INTEGER);"
+        "INSERT INTO chat_recoverable_message_join VALUES (1, 1, 123);"     # msg 1 deleted (recoverable)
+        "ALTER TABLE message ADD COLUMN date_retracted INTEGER;"
+        "UPDATE message SET date_retracted=999 WHERE ROWID=2;")             # msg 2 unsent
+    con.commit()
+    con.close()
+    pairs = {(d["chat_rowid"], d["message_rowid"]) for d in extract_mod.recoverable_deletions(str(db))}
+    assert pairs == {(1, 1), (1, 2)}
+
+
+def test_recoverable_deletions_empty_when_tables_absent(tmp_path, chatdb_factory):
+    """Older macOS without those tables/columns -> no signal, no crash."""
+    db = tmp_path / "chat.db"
+    chatdb_factory(db, [_one_to_one(messages=[
+        {"date": dbdate(1), "from_me": False, "handle": "+15550000001", "text": "x"}])])
+    assert extract_mod.recoverable_deletions(str(db)) == []
 
 
 def test_main_writes_out_file(tmp_path, chatdb_factory):

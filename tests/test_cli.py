@@ -1,4 +1,4 @@
-"""The `text-triage` entry point. Milestone 1 exposes one subcommand: `extract`."""
+"""The `text-triage` entry point dispatches: extract / summarize / serve / push."""
 import json
 
 import pytest
@@ -27,7 +27,7 @@ def test_dispatches_extract_subcommand(tmp_path, chatdb_factory):
 
 
 def test_dispatches_summarize_subcommand(monkeypatch):
-    import text_triage.summarize as S
+    import text_triage.triage.summarize as S
     seen = {}
 
     def fake_main(argv):
@@ -37,6 +37,34 @@ def test_dispatches_summarize_subcommand(monkeypatch):
     monkeypatch.setattr(S, "main", fake_main)
     assert cli.main(["summarize", "--mode", "monthly", "--out", "x"]) == 0
     assert seen["argv"] == ["--mode", "monthly", "--out", "x"]
+
+
+def test_dispatches_push_subcommand(monkeypatch):
+    import text_triage.collect.collector as C
+    seen = {}
+
+    def fake_main(argv):
+        seen["argv"] = argv
+        return 0
+
+    monkeypatch.setattr(C, "main", fake_main)
+    assert cli.main(["push", "--watch"]) == 0
+    assert seen["argv"] == ["--watch"]
+
+
+def test_dispatches_serve_subcommand(monkeypatch, tmp_path):
+    import text_triage.server.app as A
+    seen = {}
+
+    def fake_run(config, **kw):
+        seen["kw"] = kw
+
+    monkeypatch.setattr(A, "run_server", fake_run)
+    cfg = tmp_path / "conditions.yaml"
+    cfg.write_text("{}\n")
+    assert cli.main(["serve", "--config", str(cfg), "--state", "/x/state.json"]) == 0
+    assert seen["kw"]["state_path"] == "/x/state.json"
+    assert seen["kw"]["config_path"] == str(cfg)
 
 
 def test_no_subcommand_returns_usage_code(capsys):

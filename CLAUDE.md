@@ -12,7 +12,7 @@ while `.venv/bin` is left behind. So the venv MUST live OUTSIDE the iCloud tree 
 ```bash
 mkdir -p ~/.venvs && python3 -m venv ~/.venvs/text-triage
 ~/.venvs/text-triage/bin/python -m pip install --upgrade pip pydantic pyyaml pytest
-cd <repo> && ~/.venvs/text-triage/bin/python -m pytest -q     # 124 tests, ~1s
+cd <repo> && ~/.venvs/text-triage/bin/python -m pytest -q     # 173 tests, ~1s
 ```
 
 The venv lives at `~/.venvs/text-triage` (out of iCloud's reach); the code stays in the repo. pytest
@@ -43,16 +43,27 @@ independent of the repo's `conditions.yaml` and `watch.md` — never depend on t
 (editing a real knob must not break the suite).
 
 ## Project shape
-`src/text_triage/`: `extract` (chat.db → JSON) · `schema` (Pydantic state.json contract; no rolling
-`summary`, no list caps, `texts_today` on each record) · `state_io` (atomic write+lock) · `skeleton`
-(deterministic facts) · `config` (conditions.yaml → `messages`/`engine`/`vps`; secrets in `.env`) ·
-`tags` (watch.md → tag law with lifetimes + `effective_tags`) · `engine` (async model-call seam;
-`litellm` default = any provider via API key / `agent_sdk` optional = Claude Max; `StubEngine` for
-tests) · `prompts` + `agents/*.md` (each call = system [shared `_global` frame + per-agent role] +
-user [per-conversation data]) · `summarize` (daily/weekly/monthly agents, async + parallel; assemble →
-validate → one retry → never land invalid; `build_contexts` / `--show-context` dry-run) · `cli`
-(`extract` / `summarize --mode`; loads `.env`). Steering: `conditions.yaml` (knobs) + `watch.md`
-(tags) + `agents/*.md` (prompts); secrets in `.env`. Real exports / `state.json` / secrets / the
-handoff bundle are gitignored; only PII-free synthetic fixtures are committed. Design + status +
-decision log: the handoff `PLAN.md` / `CONTEXT.md` (gitignored; **refresh pending** for the litellm
-engine + config contract + prompt split).
+`src/text_triage/` is four process-named subpackages + two top-level files:
+- **`collect/`** (local collection, where chat.db lives): `extract` (chat.db → export JSON) ·
+  `collector` (poll chat.db, push new raw to the server's `/ingest`; advances a local watermark).
+- **`triage/`** (the texts→state.json pipeline): `engine` (async model-call seam; `litellm` default =
+  any provider via API key / `agent_sdk` = Claude Max; `StubEngine` for tests) · `prompts` +
+  `agents/*.md` (each call = system [shared `_global` frame + per-agent role] + user [per-conversation
+  data]) · `skeleton` (deterministic facts) · `summarize` (daily/weekly/monthly agents, async+parallel;
+  assemble → validate → one retry → never land invalid; `build_contexts`/`--show-context`;
+  `--source {chatdb,raw-store}`) · `tags` (watch.md → tag law with lifetimes + `effective_tags`).
+- **`state/`** (the typechecked record): `schema` (Pydantic state.json contract; no rolling `summary`,
+  no list caps, `texts_today` per record) · `state_io` (atomic write+flock; the single owner).
+- **`server/`** (the always-on host — a VPS or an always-on Mac mini): `raw_store`
+  (`raw_messages.sqlite`: ingest/history/export/prune; rebuilds the extractor's export shape) · `app`
+  (FastMCP over HTTP — tools `list_tags`/`get_context`/`get_raw_history`/`update_conversation` + routes
+  `/ingest` `/trigger` `/health`; fastmcp lazy-imported, the `server` extra) · `scheduler` (cadence
+  date-math; spawns `summarize --source raw-store` as a subprocess).
+- **top-level:** `config` (conditions.yaml → `messages`/`engine`/`server`; secrets in `.env`) · `cli`
+  (`extract`/`summarize`/`serve`/`push`; loads `.env`).
+
+Two processes, one split: the **collector** (`collect/`) pushes raw to the **server** (`server/`) —
+same box on a Mac mini (loopback), or laptop→VPS (HTTPS), switched by the single knob `server.url`.
+Steering: `conditions.yaml` + `watch.md` + `agents/*.md`; secrets in `.env`. Real exports /
+`state.json` / secrets / the handoff bundle are gitignored; only PII-free synthetic fixtures are
+committed. Design + status + decision log: the handoff `PLAN.md` / `CONTEXT.md` (gitignored).

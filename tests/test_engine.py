@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from text_triage.config import Config
-from text_triage.engine import AgentSdkEngine, EngineError, LiteLLMEngine, StubEngine, make_engine
+from text_triage.triage.engine import AgentSdkEngine, EngineError, LiteLLMEngine, StubEngine, make_engine
 
 
 # ----------------------------------------------------------------- StubEngine

@@ -7,7 +7,7 @@ Writes:
   tests/fixtures/synthetic_export.json            — extractor output (skeleton builder input)
   tests/fixtures/synthetic_export.expected_state.json  — golden build_skeleton(state) output
 
-Run:  uv run python scripts/make_synthetic_fixture.py
+Run:  ~/.venvs/text-triage/bin/python scripts/make_synthetic_fixture.py
 Re-run to refresh after an extractor/skeleton shape change, then eyeball the diff before committing.
 """
 import json
@@ -20,8 +20,8 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tests"))
 
 from conftest import make_chatdb  # noqa: E402  (test-support factory, reused for fixtures)
-from text_triage.extract import MAC_EPOCH_OFFSET, extract  # noqa: E402
-from text_triage.skeleton import build_skeleton  # noqa: E402
+from text_triage.collect.extract import MAC_EPOCH_OFFSET, extract  # noqa: E402
+from text_triage.triage.skeleton import build_skeleton  # noqa: E402
 
 NOW = 1_780_000_000.0  # fixed "now" so the fixture is fully deterministic
 DAY = 86400

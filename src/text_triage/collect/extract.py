@@ -14,7 +14,7 @@ filter; the new surface is:
   * a top-level ``watermark`` ``{max_date_raw, max_message_rowid}`` ordered by ``(date, rowid)``
   * ``window_messages`` (replacing the per-script ``{24h,7_day,30_day}_messages`` fields)
   * ``unresponded`` enriched to objects (``{chat_rowid, name, last_at, last_date_raw, days_waiting}``)
-  * ``conversation_filter`` applied (include_groups / named_only / min_handle_digits / min_messages)
+  * ``conversation_filter`` applied (include_groups / named_only / min_handle_digits / spam_floor)
 
 ``--window`` keeps the pre-window context prefix and emits ``unresponded``; ``--since`` (incremental)
 drops both, so it never re-emits already-summarized texts or recomputes the stale list every poll.
@@ -216,15 +216,50 @@ def _passes_handle_digits(handle, min_digits):
     return len(re.sub(r"\D", "", handle)) >= min_digits
 
 
+def recoverable_deletions(db_path=CHAT_DB):
+    """Deleted-but-recoverable + unsent messages from ``chat.db``, as ``{chat_rowid, message_rowid}``
+    pairs — a deterministic 'deleted' signal: membership in ``chat_recoverable_message_join`` (the
+    ~30-day Recently Deleted holding area) or a non-zero ``message.date_retracted`` (an Unsend). Returns
+    ``[]`` on a macOS version without these (a message permanently purged past the recovery window leaves
+    no trace and is out of reach), or if the db can't be opened (best-effort — never block a push)."""
+    try:
+        con = connect_ro(db_path)
+    except sqlite3.Error:
+        return []
+    cur = con.cursor()
+    seen, out = set(), []
+
+    def add(chat_id, msg_id):
+        if (chat_id, msg_id) not in seen:
+            seen.add((chat_id, msg_id))
+            out.append({"chat_rowid": chat_id, "message_rowid": msg_id})
+
+    try:  # Recently Deleted (the recoverable holding area)
+        for chat_id, msg_id in cur.execute("SELECT chat_id, message_id FROM chat_recoverable_message_join"):
+            add(chat_id, msg_id)
+    except sqlite3.Error:
+        pass
+    if "date_retracted" in cols_present(cur, "message"):  # Unsends, still linked in chat_message_join
+        for chat_id, msg_id in cur.execute(
+                """SELECT cmj.chat_id, m.ROWID FROM message m
+                   JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+                   WHERE m.date_retracted IS NOT NULL AND m.date_retracted != 0"""):
+            add(chat_id, msg_id)
+    con.close()
+    return out
+
+
 # ------------------------------------------------------------------------------ extract
 def extract(*, db_path=CHAT_DB, addressbook_dir=ADDRESSBOOK_DIR, window=None, since=None,
-            now=None, config=None):
+            now=None, config=None, chat_rowids=None):
     """Read ``chat.db`` and return the export dict (the source the skeleton builder transforms).
 
     Exactly one of ``window`` (``"weekly"``/``"monthly"``) or ``since`` (ISO datetime) must be given.
     ``config`` (a :class:`text_triage.config.Config`) drives the window days, the unresponded
     lookback, the context-prefix length and the conversation filter; defaults are used if omitted.
-    ``now`` (unix seconds) is injectable for deterministic windows in tests.
+    ``now`` (unix seconds) is injectable for deterministic windows in tests. ``chat_rowids`` (an
+    iterable of chat ROWIDs) restricts the read to just those conversations — the collector uses it to
+    backfill a single conversation's full history on admission.
     """
     if (window is None) == (since is None):
         raise ValueError("exactly one of window= or since= is required")
@@ -232,6 +267,8 @@ def extract(*, db_path=CHAT_DB, addressbook_dir=ADDRESSBOOK_DIR, window=None, si
         config = Config()
     if now is None:
         now = datetime.datetime.now().timestamp()
+    if chat_rowids is not None:
+        chat_rowids = set(chat_rowids)
 
     cf = config.messages
     context_messages = config.messages.context_messages
@@ -346,6 +383,8 @@ def extract(*, db_path=CHAT_DB, addressbook_dir=ADDRESSBOOK_DIR, window=None, si
     emitted = []  # every message we emit, for the watermark
 
     for cid, meta in chats.items():
+        if chat_rowids is not None and cid not in chat_rowids:
+            continue
         a = agg.get(cid)
         if not a or a["total"] == 0:
             continue
@@ -389,7 +428,9 @@ def extract(*, db_path=CHAT_DB, addressbook_dir=ADDRESSBOOK_DIR, window=None, si
                 })
 
         # ---- conversation filter (conditions.yaml) ----
-        if a["window"] < cf.min_messages:
+        if a["total"] < cf.spam_floor:                 # spam floor: too few all-time messages -> never stored
+            continue
+        if a["window"] < 1:                            # nothing in this window/since (stale -> unresponded list)
             continue
         if is_group and not cf.include_groups:
             continue

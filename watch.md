@@ -9,5 +9,5 @@
 # The summarizer may only tag with the slugs listed here; anything else is dropped.
 
 - family: Immediate and extended family members. Sticky / indefinite.
-- needs-scheduling: Threads where a specific time or date has recently been set. Relevant for about 14 days.
+- needs-scheduling: Threads where a specific time or date has recently been set. Relevant for about 5 days.
 - church: Church community, ministry, and related coordination. Indefinite.

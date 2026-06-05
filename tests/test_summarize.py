@@ -5,12 +5,12 @@ import datetime
 import json
 
 from text_triage.config import Config
-from text_triage.engine import StubEngine
-from text_triage.schema import State
-from text_triage.summarize import (build_contexts, build_daily_prompt, build_monthly_prompt,
+from text_triage.triage.engine import StubEngine
+from text_triage.state.schema import State
+from text_triage.triage.summarize import (build_contexts, build_daily_prompt, build_monthly_prompt,
                                     build_weekly_prompt, summarize_daily, summarize_monthly,
                                     summarize_weekly)
-from text_triage.tags import TagSpec
+from text_triage.triage.tags import TagSpec
 
 LAW = {
     "family": TagSpec("family", "Family.", "sticky", None),
@@ -177,7 +177,46 @@ def test_limit_only_summarizes_top_n():
     assert len(s.conversations[0].daily) == 1 and len(s.conversations[1].daily) == 0
 
 
+# ------------------------------------------------------- the daily summarize floor (delta gate)
+def test_daily_gate_skips_low_activity_conversation():
+    """Daily skips the LLM call for a conversation with fewer than summarize_floor NEW messages (the
+    gate keys on the per-conversation ``new_count`` the raw-store deltas path sets); it is carried
+    forward as raw only and flagged new_conversation. At/above the floor it is summarized."""
+    cfg = Config(messages={"summarize_floor": 5})
+    low = conv(chat_rowid=1, name="Low", handle="+15550000001",
+               messages=[msg(rowid=i, text=f"m{i}") for i in range(2)])
+    low["new_count"] = 2                                   # below floor -> skipped
+    high = conv(chat_rowid=2, name="High", handle="+15550000002",
+                messages=[msg(rowid=i, text=f"h{i}") for i in range(5)])
+    high["new_count"] = 5                                  # at floor -> summarized
+    eng = StubEngine([daily_json()])                       # one response -> only one call may happen
+    s = summarize_daily(export_with([low, high]), engine=eng, config=cfg, law=LAW)
+    assert len(eng.calls) == 1
+    by_id = {c.chat_rowid: c for c in s.conversations}
+    assert by_id[1].daily == [] and by_id[1].new_conversation is True       # skipped, never summarized
+    assert len(by_id[2].daily) == 1 and by_id[2].new_conversation is False  # summarized
+    assert by_id[2].summarized_through == 4                # cursor advanced to the newest rowid
+
+
+def test_daily_no_new_count_means_no_gate():
+    """Exports without ``new_count`` (direct calls, the chatdb path) are not gated — every conversation
+    summarizes as before, so the gate never silently changes the legacy path."""
+    s = summarize_daily(export_with([conv()]), engine=StubEngine([daily_json()]),
+                        config=Config(messages={"summarize_floor": 999}), law=LAW)
+    assert len(s.conversations[0].daily) == 1              # summarized despite a huge floor (no new_count)
+
+
 # ------------------------------------------------------------------------------ weekly
+def test_weekly_not_gated_by_summarize_floor():
+    """The floor gates daily only; weekly consolidates existing notes, so it summarizes regardless of
+    how few new messages a conversation has."""
+    low = conv(chat_rowid=1, messages=[msg(rowid=1)])
+    low["new_count"] = 1                                   # below the daily floor
+    s = summarize_weekly(export_with([low]), engine=StubEngine([weekly_json()]),
+                         config=Config(messages={"summarize_floor": 5}), law=LAW)
+    assert len(s.conversations[0].weekly) == 1
+
+
 def test_weekly_appends_note_and_clears_daily():
     prev = prev_state([prev_record(daily=[{"date": "2026-06-01", "text": "d1"}])])
     s = summarize_weekly(export_with([conv()]), engine=StubEngine([weekly_json()]),
@@ -256,7 +295,7 @@ def _cli(tmp_path, watch_line="- needs-scheduling: set a time, about 14 days"):
 
 
 def test_cli_monthly_writes_validated_state(tmp_path, chatdb_factory):
-    from text_triage import summarize as S
+    from text_triage.triage import summarize as S
     cfg, watch = _cli(tmp_path)
     spec = {"identifier": "+15550000201", "display_name": None, "handles": ["+15550000201"],
             "messages": [{"date": _recent_db_date(3), "from_me": False,
@@ -273,8 +312,93 @@ def test_cli_monthly_writes_validated_state(tmp_path, chatdb_factory):
     assert c["tags"] == ["needs-scheduling"]
 
 
+def test_cli_monthly_from_raw_store_writes_validated_state(tmp_path):
+    """The server path: no chat.db — the window is rebuilt from raw_messages.sqlite (--source raw-store)
+    and run through the same summarizer. This is how the scheduler produces state.json on the host."""
+    from text_triage.server import raw_store
+    from text_triage.triage import summarize as S
+    cfg, watch = _cli(tmp_path)
+    db = tmp_path / "raw.sqlite"
+    recent = (datetime.datetime.now() - datetime.timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+    raw_store.ingest({"conversations": [
+        {"chat_rowid": 1, "name": "Avery Quinn", "handle": "+15550000201", "is_named": True,
+         "is_groupchat": False, "members": None, "contact_details": None, "conversation": [
+             {"message_rowid": 10, "date": _recent_db_date(3), "datetime": recent,
+              "sender": "Avery Quinn", "text": "meet thursday?"}]}]}, path=db)
+    out = tmp_path / "state.json"
+    rc = S.main(["--mode", "monthly", "--source", "raw-store", "--raw-store", str(db),
+                 "--out", str(out), "--config", str(cfg), "--watch", str(watch)],
+                engine=StubEngine([monthly_json(tags=["needs-scheduling"])]))
+    assert rc == 0
+    c = json.loads(out.read_text())["conversations"][0]
+    assert c["name"] == "Avery Quinn"
+    assert c["monthly"] == "Spent the month planning."
+    assert c["tags"] == ["needs-scheduling"]
+
+
+def test_cli_daily_delta_gate_accumulates_until_floor(tmp_path):
+    """End-to-end: below the floor, daily skips the conversation and does NOT advance its cursor, so its
+    new messages accumulate across runs until they cross the floor and it is summarized."""
+    from text_triage.server import raw_store
+    from text_triage.triage import summarize as S
+    cfg = tmp_path / "conditions.yaml"
+    cfg.write_text("messages:\n  summarize_floor: 3\n")
+    watch = tmp_path / "watch.md"
+    watch.write_text("- needs-scheduling: set a time, about 14 days\n")
+    db, out = tmp_path / "raw.sqlite", tmp_path / "state.json"
+
+    def ingest(rowids):
+        raw_store.ingest({"conversations": [
+            {"chat_rowid": 1, "name": "Avery", "handle": "+15550000201", "is_named": True,
+             "is_groupchat": False, "members": None, "contact_details": None,
+             "conversation": [{"message_rowid": r, "date": r, "datetime": "2026-06-01 10:00:00",
+                               "sender": "Avery", "text": f"m{r}"} for r in rowids]}]}, path=db)
+
+    def run_daily(eng):
+        return S.main(["--mode", "daily", "--source", "raw-store", "--raw-store", str(db),
+                       "--out", str(out), "--config", str(cfg), "--watch", str(watch)], engine=eng)
+
+    ingest([1, 2])                                  # 2 new (< floor 3)
+    eng1 = StubEngine([])                            # must NOT be consumed
+    run_daily(eng1)
+    assert eng1.calls == []
+    c = json.loads(out.read_text())["conversations"][0]
+    assert c["daily"] == [] and c["new_conversation"] is True and c["summarized_through"] == 0
+
+    ingest([3])                                     # now 3 accumulated (>= floor 3)
+    eng2 = StubEngine([daily_json()])
+    run_daily(eng2)
+    assert len(eng2.calls) == 1
+    c = json.loads(out.read_text())["conversations"][0]
+    assert len(c["daily"]) == 1 and c["new_conversation"] is False and c["summarized_through"] == 3
+
+
+def test_cli_empty_source_leaves_state_untouched(tmp_path):
+    """When the source has nothing new (all cursors at their max -> deltas empty), the run is a no-op:
+    no LLM call, and a good state.json is left byte-for-byte untouched."""
+    from text_triage.server import raw_store
+    from text_triage.triage import summarize as S
+    cfg, watch = _cli(tmp_path)
+    db, out = tmp_path / "raw.sqlite", tmp_path / "state.json"
+    recent = (datetime.datetime.now() - datetime.timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+    raw_store.ingest({"conversations": [
+        {"chat_rowid": 1, "name": "Avery", "handle": "+15550000201", "is_named": True,
+         "is_groupchat": False, "members": None, "contact_details": None,
+         "conversation": [{"message_rowid": 10, "date": _recent_db_date(3), "datetime": recent,
+                           "sender": "Avery", "text": "hi"}]}]}, path=db)
+    # a monthly run creates state.json AND advances conv 1's cursor to rowid 10
+    S.main(["--mode", "monthly", "--source", "raw-store", "--raw-store", str(db), "--out", str(out),
+            "--config", str(cfg), "--watch", str(watch)], engine=StubEngine([monthly_json()]))
+    before = out.read_text()
+    eng = StubEngine([])                          # must NOT be consumed
+    rc = S.main(["--mode", "daily", "--source", "raw-store", "--raw-store", str(db), "--out", str(out),
+                 "--config", str(cfg), "--watch", str(watch)], engine=eng)
+    assert rc == 0 and eng.calls == []            # nothing new -> no engine call
+    assert out.read_text() == before              # state.json untouched
+
+
 def test_cli_daily_dispatch_writes_a_note(tmp_path, chatdb_factory):
-    from text_triage import summarize as S
+    from text_triage.triage import summarize as S
     cfg, watch = _cli(tmp_path)
     spec = {"identifier": "+15550000201", "display_name": None, "handles": ["+15550000201"],
             "messages": [{"date": _recent_db_date(1 / 24.0), "from_me": False,   # ~1 hour ago
@@ -291,7 +415,7 @@ def test_cli_daily_dispatch_writes_a_note(tmp_path, chatdb_factory):
 
 
 def test_cli_show_context_prints_prompts_and_makes_no_engine_call(tmp_path, chatdb_factory, capsys):
-    from text_triage import summarize as S
+    from text_triage.triage import summarize as S
     cfg, watch = _cli(tmp_path)
     spec = {"identifier": "+15550000201", "display_name": None, "handles": ["+15550000201"],
             "messages": [{"date": _recent_db_date(3), "from_me": False,

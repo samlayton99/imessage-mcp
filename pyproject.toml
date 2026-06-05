@@ -15,6 +15,7 @@ dependencies = [
 # Pick the backend you use (engine.provider). Both are imported lazily; the test suite needs neither.
 litellm = ["litellm>=1.40"]        # provider: litellm — any model via API key (incl. the Claude API)
 agent-sdk = ["claude-agent-sdk"]   # provider: agent_sdk — Anthropic on a Claude Max plan
+server = ["fastmcp>=2.9"]          # the `serve` host (MCP over HTTP + ingest); lazy-imported, the collector needs none
 
 [project.scripts]
 text-triage = "text_triage.cli:main"

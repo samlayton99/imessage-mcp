@@ -33,7 +33,7 @@ def discover_agents_dir(explicit: Optional[Union[str, Path]] = None) -> Path:
     cwd = Path.cwd() / "agents"
     if cwd.is_dir():
         return cwd
-    return Path(__file__).resolve().parents[2] / "agents"  # src/text_triage/prompts.py -> repo/agents
+    return Path(__file__).resolve().parents[3] / "agents"  # src/text_triage/triage/prompts.py -> repo/agents
 
 
 def render(name: str, mapping: dict, *, agents_dir: Optional[Union[str, Path]] = None) -> str:

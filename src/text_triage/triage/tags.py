@@ -113,7 +113,7 @@ def effective_tags(conversation, law: dict[str, TagSpec], *,
     ``sticky`` tags are always effective; ``ttl`` tags only while ``last_message_at`` is within
     ``ttl_days`` of ``as_of`` (default now). A tag not in the law, or an unparseable
     ``last_message_at``, is kept (lenient — never hide on uncertainty). Accepts a dict or a
-    :class:`~text_triage.schema.Conversation`."""
+    :class:`~text_triage.state.schema.Conversation`."""
     tags = _field(conversation, "tags") or []
     if as_of is None:
         as_of = datetime.datetime.now()

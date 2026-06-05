@@ -1,5 +1,5 @@
 # conditions.yaml — everything you steer, in one place. Defaults equal the designed behavior.
-# Secrets (API keys, VPS tokens) live next to this in .env, never here.
+# Secrets (API keys, server tokens) live next to this in .env, never here.
 
 # ── 1. TEXT MESSAGE RULES ─ what gets read & summarized ──────────────────────
 messages:
@@ -11,7 +11,11 @@ messages:
   include_groups: true
   named_only: false               # true = only address-book contacts
   min_handle_digits: 10           # drop shortcodes / sub-10-digit senders (e.g. '38792')
-  min_messages: 2
+  spam_floor: 1                   # STORAGE: drop conversations with fewer than this many ALL-TIME
+                                  # messages (tapbacks counted) — spam / one-offs never reach the server. 1 = keep all.
+  backfill_years: 3               # how far back the collector mirrors a conversation's full history on admission
+  summarize_floor: 5              # SUMMARIZE: daily skips a conversation with fewer than this many NEW
+                                  # messages since its last summary (it stays in raw history). 0 = no gate.
 
 # ── 2. MODELS & BILLING ─ who runs each summary, and how you pay ─────────────
 engine:
@@ -29,16 +33,22 @@ engine:
   # API keys live in .env (ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY …).
   # provider: agent_sdk uses your Claude Max session — `claude setup-token`, no key needed.
 
-# ── 3. VPS ─ where state.json is owned & served (set this up later) ──────────
-vps:
-  url: ""                         # blank = run locally; later: https://triage.yourhost.com
-  raw_store_days: 0               # SERVER RETENTION: how long raw message TEXT is kept on the VPS for
+# ── 3. SERVER ─ where state.json is owned & served (a VPS or an always-on Mac mini) ──
+server:
+  url: ""                         # COLLECTOR: where the chat.db host pushes raw. blank = the local server
+                                  # on THIS machine (all-in-one Mac mini); set = https://triage.yourhost.com
+  bind: "127.0.0.1:8787"          # SERVER: host:port `serve` listens on. 0.0.0.0 to expose on a LAN/VPS.
+  raw_store_days: 0               # SERVER RETENTION: how long raw message TEXT is kept on the server for
                                   # later look-back (not summaries, not sent to the model). 0 = keep forever.
+  mcp_default_lookback_days: 60   # MCP: get_context/get_raw_history with no `since` return only the last
+                                  # N days (the store keeps all; clients ask for older with an explicit since). 0 = no default.
   schedule:
     timezone: auto                # auto = the Mac's system timezone
     daily:   ["on_open", "21:00"]
     weekly:  ["mon 03:00"]
     monthly: ["1 03:00"]
+  bootstrap_limit: 0              # caps conversations per UNATTENDED summary run (scheduler + /trigger),
+                                  # incl. the one-time bootstrap monthly. Set low (e.g. 20) for cheap dev testing. 0 = uncapped.
   live:
     mode: interval                # interval = poll every N s | watch = FSEvents (later)
     interval_seconds: 30

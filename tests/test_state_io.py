@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from text_triage import state_io
-from text_triage.schema import State, ValidationError, validate_state
+from text_triage.state import state_io
+from text_triage.state.schema import State, ValidationError, validate_state
 
 
 def good_state_dict():

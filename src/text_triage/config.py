@@ -36,7 +36,15 @@ class Messages(_CBase):
     include_groups: bool = True
     named_only: bool = False
     min_handle_digits: int = Field(default=10, ge=0)
-    min_messages: int = Field(default=1, ge=0)
+    # STORAGE filter: a conversation with fewer than this many ALL-TIME messages (tapbacks included)
+    # never enters the server store. Below it is treated as spam / one-off; at/above it is mirrored.
+    spam_floor: int = Field(default=1, ge=0)
+    # How far back the collector's first/admission backfill reaches when mirroring a conversation's
+    # full history to the server.
+    backfill_years: int = Field(default=3, ge=1)
+    # SUMMARIZE floor: daily skips the LLM call for a conversation with fewer than this many NEW
+    # messages since its last summary (it rides in the raw layer until it accumulates). 0 = no gate.
+    summarize_floor: int = Field(default=5, ge=0)
 
 
 # ── 2. models & billing ─ who runs each summary, and how you pay ─────────────
@@ -49,7 +57,7 @@ class ModelRoles(_CBase):
 
 class RawCaps(_CBase):
     """LLM-INPUT cap: most raw msgs from a window packed into one summary call, per cadence; 0 = no cap.
-    Distinct from Messages.context_messages (extraction lead-in) and Vps.raw_store_days (server retention)."""
+    Distinct from Messages.context_messages (extraction lead-in) and Server.raw_store_days (server retention)."""
     daily: int = Field(default=0, ge=0)
     weekly: int = Field(default=0, ge=0)
     monthly: int = Field(default=0, ge=0)
@@ -63,7 +71,7 @@ class Engine(_CBase):
     max_raw_messages: RawCaps = Field(default_factory=RawCaps)
 
 
-# ── 3. VPS ─ owns & serves state.json (mostly wired later) ───────────────────
+# ── 3. SERVER ─ where state.json is owned & served (VPS or an always-on Mac mini) ──
 class Schedule(_CBase):
     timezone: str = "auto"  # auto = the Mac's system timezone
     daily: list[str] = ["on_open", "21:00"]
@@ -76,9 +84,19 @@ class Live(_CBase):
     interval_seconds: int = Field(default=30, ge=1)
 
 
-class Vps(_CBase):
-    url: str = ""                                  # blank = run locally
-    raw_store_days: int = Field(default=0, ge=0)   # SERVER RETENTION: how long raw text is kept on the VPS; 0 = forever
+class Server(_CBase):
+    # COLLECTOR knob: where the chat.db host pushes raw. blank = the local server on THIS machine
+    #   (loopback / all-in-one Mac mini); a URL = a remote server, e.g. https://triage.yourhost.com.
+    url: str = ""
+    # SERVER knob: host:port the `serve` process listens on. 0.0.0.0 to expose on a LAN/VPS.
+    bind: str = "127.0.0.1:8787"
+    raw_store_days: int = Field(default=0, ge=0)   # SERVER RETENTION: how long raw text is kept on the server; 0 = forever
+    # MCP default look-back: get_context / get_raw_history with no explicit `since` only return the last
+    # N days (the deep store keeps everything; clients opt into older with an explicit since). 0 = no default.
+    mcp_default_lookback_days: int = Field(default=60, ge=0)
+    # Caps the conversations per UNATTENDED summary run (the scheduler + /trigger spawns) — set low
+    # (e.g. 20) for cheap dev testing, including the one-time bootstrap monthly. 0 = uncapped.
+    bootstrap_limit: int = Field(default=0, ge=0)
     schedule: Schedule = Field(default_factory=Schedule)
     live: Live = Field(default_factory=Live)
 
@@ -86,7 +104,7 @@ class Vps(_CBase):
 class Config(_CBase):
     messages: Messages = Field(default_factory=Messages)
     engine: Engine = Field(default_factory=Engine)
-    vps: Vps = Field(default_factory=Vps)
+    server: Server = Field(default_factory=Server)
 
 
 def _discover_path(explicit: Optional[Union[str, Path]]) -> Optional[Path]:

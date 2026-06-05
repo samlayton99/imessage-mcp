@@ -3,7 +3,7 @@ frame, with ${law}) + <mode>.md (role); user = <mode>.user.md (this conversation
 content lives in the markdown files, not in code."""
 import pytest
 
-from text_triage.prompts import build_system, build_user, render
+from text_triage.triage.prompts import build_system, build_user, render
 
 
 # ---- render (low-level) ------------------------------------------------------

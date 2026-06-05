@@ -1,5 +1,5 @@
 """conditions.yaml is the single steering surface. config.py makes it the source of truth: typed,
-validated, organized into the user-facing concerns (messages / engine / vps; tags live in watch.md),
+validated, organized into the user-facing concerns (messages / engine / server; tags live in watch.md),
 with defaults that equal the designed behavior."""
 from pathlib import Path
 
@@ -25,13 +25,19 @@ def test_defaults_equal_designed_behavior():
     assert c.messages.unresponded_lookback_days == 90
     assert c.messages.include_groups is True
     assert c.messages.min_handle_digits == 10
+    assert c.messages.spam_floor == 1               # storage floor: drop sub-1-message (spam) convos
+    assert c.messages.backfill_years == 3           # admission backfill reach
+    assert c.messages.summarize_floor == 5          # daily skips < 5 new messages
     assert c.engine.provider == "litellm"
     assert c.engine.max_concurrency == 8
     assert c.engine.models.daily == "anthropic/claude-sonnet-4-6"
     assert c.engine.max_raw_messages.monthly == 0
-    assert c.vps.url == ""
-    assert c.vps.raw_store_days == 0
-    assert c.vps.schedule.timezone == "auto"
+    assert c.server.url == ""                       # blank = the local server on this host
+    assert c.server.bind == "127.0.0.1:8787"        # where `serve` listens by default
+    assert c.server.raw_store_days == 0
+    assert c.server.mcp_default_lookback_days == 60  # MCP default look-back window
+    assert c.server.bootstrap_limit == 0            # uncapped unattended runs by default
+    assert c.server.schedule.timezone == "auto"
 
 
 def test_missing_file_falls_back_to_defaults(tmp_path, monkeypatch):
@@ -55,6 +61,14 @@ def test_engine_section_overrides(tmp_path):
     assert c.engine.max_concurrency == 4
     assert c.engine.models.daily == "openai/gpt-x"
     assert c.engine.models.weekly == "anthropic/claude-opus-4-8"  # untouched default keeps
+
+
+def test_server_section_overrides(tmp_path):
+    p = write_yaml(tmp_path, 'server:\n  url: "https://triage.host"\n  bind: "0.0.0.0:9000"\n')
+    c = load_config(p)
+    assert c.server.url == "https://triage.host"    # set => push raw to this remote server
+    assert c.server.bind == "0.0.0.0:9000"          # expose on LAN/VPS
+    assert c.server.raw_store_days == 0             # untouched default keeps
 
 
 def test_explicit_missing_path_raises(tmp_path):
@@ -87,13 +101,13 @@ def test_unknown_key_raises_config_error(tmp_path):
 
 
 def test_raw_store_days_zero_allowed_means_keep_forever(tmp_path):
-    c = load_config(write_yaml(tmp_path, "vps:\n  raw_store_days: 0\n"))
-    assert c.vps.raw_store_days == 0  # 0 = no pruning (keep raw forever)
+    c = load_config(write_yaml(tmp_path, "server:\n  raw_store_days: 0\n"))
+    assert c.server.raw_store_days == 0  # 0 = no pruning (keep raw forever)
 
 
 def test_negative_raw_store_days_rejected(tmp_path):
     with pytest.raises(ConfigError):
-        load_config(write_yaml(tmp_path, "vps:\n  raw_store_days: -1\n"))
+        load_config(write_yaml(tmp_path, "server:\n  raw_store_days: -1\n"))
 
 
 # ----------------------------------------------------------------- the committed file
@@ -101,4 +115,4 @@ def test_committed_conditions_yaml_loads():
     """The repo's conditions.yaml must always parse under the model (no stray/typo keys)."""
     c = load_config(REPO_ROOT / "conditions.yaml")
     assert isinstance(c, Config)
-    assert c.vps.schedule.timezone == "auto"
+    assert c.server.schedule.timezone == "auto"

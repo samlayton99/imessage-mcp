@@ -1,7 +1,7 @@
 """The summary agents (PLAN Step 0+amendments): daily, weekly, monthly.
 
-Each turns an :func:`text_triage.extract.extract` export + the previous ``state.json`` into a fresh,
-validated :class:`~text_triage.schema.State`, with strictly non-overlapping write power (the
+Each turns an :func:`text_triage.collect.extract.extract` export + the previous ``state.json`` into a fresh,
+validated :class:`~text_triage.state.schema.State`, with strictly non-overlapping write power (the
 agent→field matrix in the handoff PLAN.md):
 
   * **daily** — reads the whole record + new raw msgs; appends one ``daily`` note, ADDS tags (never
@@ -28,11 +28,11 @@ from pathlib import Path
 from typing import Optional, Sequence, Union
 
 from text_triage.config import Config
-from text_triage.engine import Engine
-from text_triage.prompts import build_system, build_user
-from text_triage.schema import Conversation, State, validate_state
-from text_triage.skeleton import build_skeleton
-from text_triage.tags import active_slugs, load_law
+from text_triage.triage.engine import Engine
+from text_triage.triage.prompts import build_system, build_user
+from text_triage.state.schema import Conversation, State, validate_state
+from text_triage.triage.skeleton import build_skeleton
+from text_triage.triage.tags import active_slugs, load_law
 
 __all__ = [
     "summarize_daily", "summarize_weekly", "summarize_monthly",
@@ -42,7 +42,10 @@ __all__ = [
 log = logging.getLogger(__name__)
 
 # Agent-authored fields carried forward from the previous record (facts come fresh from extract).
-_CARRY = ("identity", "tags", "daily", "weekly", "monthly", "history", "edited", "texts_today")
+# `summarized_through` (the per-conversation summary cursor) carries so a skipped conversation keeps
+# its cursor and its new messages accumulate until they cross the floor.
+_CARRY = ("identity", "tags", "daily", "weekly", "monthly", "history", "edited", "texts_today",
+          "summarized_through")
 
 
 # --------------------------------------------------------------------------- formatting
@@ -278,6 +281,13 @@ async def _summarize(mode: str, export: dict, *, engine: Engine, config: Optiona
     note_date, now_str = generated_at[:10], generated_at
 
     raw_by_id = {c["chat_rowid"]: c["conversation"] for c in export["conversations"]}
+    # The delta gate (daily only): skip the LLM call for a conversation with < summarize_floor NEW
+    # messages. `new_count` is set only by the raw-store deltas path; absent (chatdb / direct calls) ->
+    # ungated. `current_max` advances the per-conversation cursor when a real summary happens.
+    new_count_by_id = {c["chat_rowid"]: c.get("new_count") for c in export["conversations"]}
+    current_max_by_id = {cid: max((m["message_rowid"] for m in msgs), default=0)
+                         for cid, msgs in raw_by_id.items()}
+    gate, floor = (mode == "daily"), config.messages.summarize_floor
     prev_dict = prev_state.model_dump() if isinstance(prev_state, State) else (prev_state or {})
     prev_by_id = {c["chat_rowid"]: c for c in prev_dict.get("conversations", [])}
 
@@ -290,15 +300,20 @@ async def _summarize(mode: str, export: dict, *, engine: Engine, config: Optiona
 
     async def _slot(idx, skel):
         cid = skel["chat_rowid"]
+        prev = prev_by_id.get(cid)
         if limit is not None and idx >= limit:                  # cost cap: no LLM call beyond limit
-            prev = prev_by_id.get(cid)
+            return (prev if prev else dict(skel)), cid
+        nc = new_count_by_id.get(cid)
+        if gate and nc is not None and nc < floor:              # delta gate: too few new msgs -> ride raw
             return (prev if prev else dict(skel)), cid
         async with sem:
-            rec = await _run_one(mode, skel, raw_by_id.get(cid, []), prev_by_id.get(cid),
+            rec = await _run_one(mode, skel, raw_by_id.get(cid, []), prev,
                                  engine=engine, config=config, law=law, law_slugs=law_slugs,
                                  generated_at=generated_at, note_date=note_date, now_str=now_str,
                                  agents_dir=agents_dir)
-        return rec.model_dump(), cid
+        rec = rec.model_dump()
+        rec["summarized_through"] = max(rec.get("summarized_through") or 0, current_max_by_id.get(cid, 0))
+        return rec, cid
 
     slots = await asyncio.gather(*(_slot(i, s) for i, s in enumerate(sk["conversations"])))
     out = [rec for rec, _ in slots]
@@ -309,6 +324,9 @@ async def _summarize(mode: str, export: dict, *, engine: Engine, config: Optiona
             prec = dict(prec)
             prec["tags"] = [t for t in (prec.get("tags") or []) if t in law_slugs]   # self-heal law edits
             out.append(prec)
+
+    for rec in out:                                             # deterministic: never summarized <-> cursor 0
+        rec["new_conversation"] = (rec.get("summarized_through") or 0) == 0
 
     # daily (incremental/since) carries the prior unresponded list; weekly/monthly recompute it.
     unresponded = (prev_dict.get("unresponded", []) or sk["unresponded"]) if mode == "daily" else sk["unresponded"]
@@ -377,18 +395,24 @@ def main(argv: Optional[Sequence[str]] = None, *, engine: Optional[Engine] = Non
     import argparse
 
     from text_triage.config import load_config
-    from text_triage.engine import make_engine
-    from text_triage.extract import ADDRESSBOOK_DIR, CHAT_DB, extract
-    from text_triage.state_io import read_state, write_state
+    from text_triage.triage.engine import make_engine
+    from text_triage.collect.extract import ADDRESSBOOK_DIR, CHAT_DB, extract
+    from text_triage.state.state_io import read_state, write_state
 
     p = argparse.ArgumentParser(
         prog="text-triage summarize",
         description="Run a daily/weekly/monthly summary agent into a validated state.json.",
     )
     p.add_argument("--mode", choices=["daily", "weekly", "monthly"], default="daily")
-    p.add_argument("--since", help="ISO datetime override for daily's incremental window")
+    p.add_argument("--since", help="ISO datetime override for daily's incremental window "
+                                   "(--source chatdb only; the raw-store path uses per-conversation cursors)")
     p.add_argument("--out", help="state.json to write/update (default: stdout)")
-    p.add_argument("--db", default=CHAT_DB, help="path to chat.db")
+    p.add_argument("--source", choices=["chatdb", "raw-store"], default="chatdb",
+                   help="raw source: chatdb (the Mac, default) or raw-store (the server's "
+                        "raw_messages.sqlite — how the scheduler runs summaries on the always-on host)")
+    p.add_argument("--db", default=CHAT_DB, help="path to chat.db (with --source chatdb)")
+    p.add_argument("--raw-store", dest="raw_store",
+                   help="path to raw_messages.sqlite (with --source raw-store)")
     p.add_argument("--addressbook", default=ADDRESSBOOK_DIR, help="AddressBook dir for contacts")
     p.add_argument("--config", help="path to conditions.yaml (default: auto-discover)")
     p.add_argument("--watch", help="path to watch.md tag scratchpad (default: auto-discover)")
@@ -400,16 +424,23 @@ def main(argv: Optional[Sequence[str]] = None, *, engine: Optional[Engine] = Non
 
     config = load_config(args.config)
     law = load_law(args.watch)
+    prev = read_state(args.out, law=active_slugs(law)) if args.out and Path(args.out).exists() else None
 
-    if args.mode == "monthly":
+    daily_since = args.since or (datetime.datetime.now() - datetime.timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+    if args.source == "raw-store":  # the server rebuilds the window from its raw store, no chat.db
+        from text_triage.server.raw_store import deltas as raw_deltas, export as raw_export
+        raw_path = args.raw_store or str(Path.home() / ".text-triage" / "raw_messages.sqlite")
+        if args.mode in ("monthly", "weekly"):
+            export = raw_export(window=args.mode, config=config, path=raw_path)
+        else:  # daily: per-conversation deltas since each conversation's own last-summary cursor
+            cursors = {c.chat_rowid: c.summarized_through for c in prev.conversations} if prev else {}
+            export = raw_deltas(cursors, path=raw_path)
+    elif args.mode == "monthly":
         export = extract(db_path=args.db, addressbook_dir=args.addressbook, window="monthly", config=config)
     elif args.mode == "weekly":
         export = extract(db_path=args.db, addressbook_dir=args.addressbook, window="weekly", config=config)
     else:  # daily: the messages since last run (Step-0 stand-in for the watcher's texts_today)
-        since = args.since or (datetime.datetime.now() - datetime.timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
-        export = extract(db_path=args.db, addressbook_dir=args.addressbook, since=since, config=config)
-
-    prev = read_state(args.out, law=active_slugs(law)) if args.out and Path(args.out).exists() else None
+        export = extract(db_path=args.db, addressbook_dir=args.addressbook, since=daily_since, config=config)
 
     if args.show_context:                       # inspect the exact prompts; no LLM call, no spend
         ctxs = build_contexts(args.mode, export, config=config, prev_state=prev, law=law, limit=args.limit)
@@ -421,6 +452,10 @@ def main(argv: Optional[Sequence[str]] = None, *, engine: Optional[Engine] = Non
             print(c["user"])
             print()
         print(f"[{args.mode}] {len(ctxs)} conversation context(s) shown; no LLM call made.")
+        return 0
+
+    if not export["conversations"]:             # nothing new -> never overwrite a good state.json
+        print(f"[{args.mode}] source is empty; leaving {args.out or 'state.json'} untouched.")
         return 0
 
     if engine is None:

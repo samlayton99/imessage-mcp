@@ -1,6 +1,6 @@
 """Deterministic state-skeleton builder.
 
-Transforms an :func:`text_triage.extract.extract` export into the DETERMINISTIC fields of
+Transforms an :func:`text_triage.collect.extract.extract` export into the DETERMINISTIC fields of
 ``state.json`` — facts owned by code (PLAN "The LLM enriches; code owns correctness"). Every
 agent-authored field (``identity``, ``tags``, ``daily``/``weekly``/``monthly``, ``history``) is left
 blank; the summary agents fill them in later. ``texts_today`` is empty (the watcher feeds it).
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from text_triage.schema import State, validate_state
+from text_triage.state.schema import State, validate_state
 
 __all__ = ["build_skeleton", "needs_reply_gate"]
 
