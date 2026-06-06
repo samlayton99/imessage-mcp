@@ -325,8 +325,17 @@ async def _summarize(mode: str, export: dict, *, engine: Engine, config: Optiona
             prec["tags"] = [t for t in (prec.get("tags") or []) if t in law_slugs]   # self-heal law edits
             out.append(prec)
 
-    for rec in out:                                             # deterministic: never summarized <-> cursor 0
-        rec["new_conversation"] = (rec.get("summarized_through") or 0) == 0
+    # new_conversation = the conversation holds fewer than summarize_floor raw texts in total -- a count,
+    # NOT a function of summary progress. So an established conversation with no cursor yet (e.g. one a
+    # --limit run skipped on first boot) is not wrongly flagged new. text_count is the all-time stored
+    # count (raw_store/extract); absent for carry-forward idle records -> keep their prior flag.
+    text_count_by_id = {c["chat_rowid"]: c.get("text_count") for c in export["conversations"]}
+    for rec in out:
+        tc = text_count_by_id.get(rec["chat_rowid"])
+        if tc is not None:
+            rec["new_conversation"] = tc < floor
+        else:
+            rec.setdefault("new_conversation", False)
 
     # daily (incremental/since) carries the prior unresponded list; weekly/monthly recompute it.
     unresponded = (prev_dict.get("unresponded", []) or sk["unresponded"]) if mode == "daily" else sk["unresponded"]

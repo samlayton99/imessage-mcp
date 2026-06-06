@@ -185,17 +185,61 @@ def test_daily_gate_skips_low_activity_conversation():
     cfg = Config(messages={"summarize_floor": 5})
     low = conv(chat_rowid=1, name="Low", handle="+15550000001",
                messages=[msg(rowid=i, text=f"m{i}") for i in range(2)])
-    low["new_count"] = 2                                   # below floor -> skipped
+    low["new_count"], low["text_count"] = 2, 2             # below floor -> skipped; few texts -> new
     high = conv(chat_rowid=2, name="High", handle="+15550000002",
                 messages=[msg(rowid=i, text=f"h{i}") for i in range(5)])
-    high["new_count"] = 5                                  # at floor -> summarized
+    high["new_count"], high["text_count"] = 5, 5           # at floor -> summarized
     eng = StubEngine([daily_json()])                       # one response -> only one call may happen
     s = summarize_daily(export_with([low, high]), engine=eng, config=cfg, law=LAW)
     assert len(eng.calls) == 1
     by_id = {c.chat_rowid: c for c in s.conversations}
-    assert by_id[1].daily == [] and by_id[1].new_conversation is True       # skipped, never summarized
+    assert by_id[1].daily == [] and by_id[1].new_conversation is True       # skipped; only 2 texts
     assert len(by_id[2].daily) == 1 and by_id[2].new_conversation is False  # summarized
     assert by_id[2].summarized_through == 4                # cursor advanced to the newest rowid
+
+
+def test_new_conversation_keys_on_text_count_not_summary_status():
+    """new_conversation reflects whether the conversation has fewer than summarize_floor RAW texts in
+    total -- NOT whether it has ever been summarized. An established conversation that daily skips (few
+    NEW messages) is not new; a tiny one is new even though daily also skips it."""
+    cfg = Config(messages={"summarize_floor": 5})
+    established = conv(chat_rowid=1, name="Established", handle="+15550000001",
+                      messages=[msg(rowid=99, text="hey")])
+    established["new_count"], established["text_count"] = 1, 50   # 1 new -> skipped, but 50 texts total
+    fresh = conv(chat_rowid=2, name="Fresh", handle="+15550000002",
+                 messages=[msg(rowid=i, text=f"f{i}") for i in range(3)])
+    fresh["new_count"], fresh["text_count"] = 3, 3               # below floor -> skipped, and few texts
+    s = summarize_daily(export_with([established, fresh]), engine=StubEngine([]), config=cfg, law=LAW)
+    by_id = {c.chat_rowid: c for c in s.conversations}
+    assert by_id[1].daily == [] and by_id[1].new_conversation is False      # skipped, but established
+    assert by_id[2].daily == [] and by_id[2].new_conversation is True       # skipped, and new
+
+
+def test_limit_skipped_established_conversation_is_not_new():
+    """The bootstrap bug this fixes: a conversation with many texts that a --limit run did NOT summarize
+    (so it has no cursor yet) must not be flagged new -- newness is about text count, not the cursor."""
+    cfg = Config(messages={"summarize_floor": 5})
+    a = conv(chat_rowid=1, name="A", handle="+15550000001"); a["text_count"] = 80
+    b = conv(chat_rowid=2, name="B", handle="+15550000002"); b["text_count"] = 120
+    s = summarize_monthly(export_with([a, b]), engine=StubEngine([monthly_json()]),
+                          config=cfg, law=LAW, limit=1)            # only the first is summarized
+    by_id = {c.chat_rowid: c for c in s.conversations}
+    assert by_id[1].monthly and by_id[1].new_conversation is False           # summarized
+    assert by_id[2].monthly is None and by_id[2].summarized_through == 0      # limit-skipped, no cursor
+    assert by_id[2].new_conversation is False                                # but NOT new -- 120 texts
+
+
+def test_new_conversation_stays_true_for_tiny_conversation_after_summary():
+    """A conversation with fewer than summarize_floor total texts stays flagged new even after a
+    (non-gated) monthly summary -- the flag is the text count, not summary progress."""
+    cfg = Config(messages={"summarize_floor": 5})
+    tiny = conv(chat_rowid=1, name="Tiny", handle="+15550000001",
+                messages=[msg(rowid=i, text=f"t{i}") for i in range(3)])
+    tiny["text_count"] = 3
+    s = summarize_monthly(export_with([tiny]), engine=StubEngine([monthly_json()]), config=cfg, law=LAW)
+    c = s.conversations[0]
+    assert c.monthly and c.summarized_through == 2          # it WAS summarized + cursor advanced
+    assert c.new_conversation is True                       # but still new -- only 3 texts
 
 
 def test_daily_no_new_count_means_no_gate():

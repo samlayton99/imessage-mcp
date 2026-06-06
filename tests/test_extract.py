@@ -106,6 +106,7 @@ def test_window_includes_context_prefix_but_counts_only_in_window(tmp_path, chat
     out = _run(tmp_path / "chat.db", tmp_path / "ab", window="monthly")  # context_messages=10 (default)
     c = out["conversations"][0]
     assert c["window_messages"] == 1  # only the in-window message
+    assert c["text_count"] == 3        # all-time count (every message, not just the window)
     assert [m["text"] for m in c["conversation"]] == ["old1", "old2", "recent"]  # 2 prefix + 1, chronological
 
 

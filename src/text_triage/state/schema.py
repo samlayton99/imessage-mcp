@@ -109,8 +109,9 @@ class Conversation(_Base):
     # The max message_rowid this conversation's last summary saw; the daily delta gate measures
     # "new since last summary" against it. 0 = never summarized.
     summarized_through: int = 0
-    # Admitted to the store but never summarized yet (rides as raw only). Set deterministically from
-    # the cursor: new_conversation == (summarized_through == 0).
+    # Too small to summarize yet: fewer than summarize_floor raw texts in total (rides as raw only).
+    # Set deterministically from the count, NOT the cursor -- an established conversation with no cursor
+    # yet (e.g. one a --limit run skipped) is not new. new_conversation == (text_count < summarize_floor).
     new_conversation: bool = False
     # --- live raw layer (code-owned; watcher pushes, the daily agent reads then clears) ---
     texts_today: list[TodayMessage] = []

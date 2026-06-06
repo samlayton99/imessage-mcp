@@ -107,6 +107,7 @@ def test_export_window_is_consumable_by_skeleton(tmp_path):
     assert [m["message_rowid"] for m in conv10["conversation"]] == [2, 3, 4]  # 40d-ago dropped
     assert conv10["responded"] is False          # last in-window msg is from Avery
     assert conv10["window_messages"] == 3
+    assert conv10["text_count"] == 4              # all-time stored count (incl. the 40d-ago message)
 
     # the stale 1:1 (last 45d ago) is filtered OUT of conversations but surfaces as unresponded
     assert 30 not in [c["chat_rowid"] for c in exp["conversations"]]
@@ -139,6 +140,7 @@ def test_deltas_returns_only_messages_after_each_cursor(tmp_path):
     by_id = {c["chat_rowid"]: c for c in out["conversations"]}
     assert [m["message_rowid"] for m in by_id[10]["conversation"]] == [3, 4]
     assert by_id[10]["new_count"] == 2
+    assert by_id[10]["text_count"] == 4                 # FULL stored count, not the 2-message delta
     assert [m["message_rowid"] for m in by_id[30]["conversation"]] == [6, 7]
     assert by_id[20]["new_count"] == 1                  # absent cursor = 0 -> the one message is new
 

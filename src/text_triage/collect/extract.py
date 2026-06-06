@@ -458,6 +458,7 @@ def extract(*, db_path=CHAT_DB, addressbook_dir=ADDRESSBOOK_DIR, window=None, si
             "members": members,
             "contact_details": contact_details,
             "window_messages": a["window"],
+            "text_count": a["total"],              # all-time count (drives the new_conversation flag)
             "conversation": rendered,
             "_sort": a["last_date"] or 0,
         })

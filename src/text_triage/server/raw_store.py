@@ -239,7 +239,8 @@ def export(*, window: Optional[str] = None, since: Optional[str] = None,
             "chat_rowid": cid, "name": m["name"], "handle": handle,
             "is_named": is_named, "is_groupchat": is_group, "responded": responded,
             "members": m["members"], "contact_details": m["contact_details"],
-            "window_messages": window_count, "conversation": rendered, "_sort": last_date,
+            "window_messages": window_count, "text_count": total,
+            "conversation": rendered, "_sort": last_date,
         })
 
     con.close()
@@ -280,6 +281,11 @@ def deltas(cursors: dict, *, now: Optional[float] = None, path: Union[str, Path]
             "contact_details": json.loads(row[6]) if row[6] else None,
         }
 
+    # Full stored count per conversation (all history, not just the post-cursor delta) -> the
+    # new_conversation flag keys on this, so it must reflect total texts, not what's new this run.
+    totals = dict(cur.execute(
+        "SELECT chat_rowid, COUNT(*) FROM messages WHERE deleted=0 GROUP BY chat_rowid"))
+
     conversations: list = []
     emitted: list = []
     for cid in [r[0] for r in cur.execute("SELECT DISTINCT chat_rowid FROM messages")]:
@@ -304,7 +310,7 @@ def deltas(cursors: dict, *, now: Optional[float] = None, path: Union[str, Path]
             "responded": True if is_group else (rows[-1][3] == "me"),
             "members": m["members"], "contact_details": m["contact_details"],
             "window_messages": len(rendered), "conversation": rendered,
-            "new_count": len(rendered), "_sort": rows[-1][1],
+            "new_count": len(rendered), "text_count": totals.get(cid, 0), "_sort": rows[-1][1],
         })
 
     con.close()
