@@ -49,7 +49,7 @@ server:
     daily:   ["on_open", "21:00"]
     weekly:  ["mon 03:00"]
     monthly: ["1 03:00"]
-  bootstrap_limit: 0              # caps conversations per UNATTENDED summary run (scheduler + /trigger),
+  bootstrap_limit: 20              # caps conversations per UNATTENDED summary run (scheduler + /trigger),
                                   # incl. the one-time bootstrap monthly. Set low (e.g. 20) for cheap dev testing. 0 = uncapped.
   texts_today_cap: 25             # LIVE RAW: get_context derives each match's texts_today from the raw store
                                   # (messages newer than its summary cursor); keep only the newest N. 0 = uncapped.
