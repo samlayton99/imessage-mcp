@@ -62,10 +62,13 @@ independent of the repo's `conditions.yaml` and `watch.md` — never depend on t
   `state_io` (atomic write+flock; the single owner).
 - **`server/`** (the always-on host — a VPS or an always-on Mac mini): `raw_store`
   (`raw_messages.sqlite`: ingest/history/counts/export/prune; rebuilds the extractor's export shape) ·
-  `app` (FastMCP over HTTP — tools `list_tags`/`quickscan`/`get_context`/`get_raw_history`/
-  `update_conversation` + routes `/ingest` `/trigger` `/health`; fastmcp lazy-imported, the `server`
-  extra; `reply_status` decay computed at query time) · `scheduler` (cadence date-math; spawns
-  `summarize --source raw-store` as a subprocess).
+  `app` (FastMCP over HTTP — tools `list_available_tags`/`scan_conversations`/
+  `get_conversation_context`/`get_message_history`/`update_conversation_memory` + routes `/ingest`
+  `/trigger` `/health`; fastmcp lazy-imported, the `server` extra; `reply_status` decay computed at
+  query time. MCP responses are a deterministic agent-facing presentation: `conversation_id` not
+  chat_rowid, humanized timestamps ["May 7, 2026 12:35pm"], `{when,sender,text}` messages, internal
+  fields dropped — the `_present_*` helpers; server `instructions=` document it for clients) ·
+  `scheduler` (cadence date-math; spawns `summarize --source raw-store` as a subprocess).
 - **top-level:** `config` (conditions.yaml → `messages`/`engine`/`server`; secrets in `.env`) · `cli`
   (`extract`/`summarize`/`serve`/`push`; loads `.env`).
 

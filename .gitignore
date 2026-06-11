@@ -29,3 +29,6 @@ dist/
 
 # macOS
 .DS_Store
+
+# dogfooding captures (real names/messages — never commit)
+poke_feedback.md

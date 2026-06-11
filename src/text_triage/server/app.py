@@ -41,14 +41,79 @@ def _resolve_since(since: Optional[str], default_lookback_days: Optional[int],
     return (base - datetime.timedelta(days=default_lookback_days)).strftime("%Y-%m-%d %H:%M:%S")
 
 
+# ----------------------------------------------------- the agent-facing presentation
+def _fmt_dt(s: Optional[str]) -> Optional[str]:
+    """Humanize a stored ``YYYY-MM-DD HH:MM:SS`` timestamp into "May 30, 2026 10:00am" — the one
+    timestamp format every MCP response uses. Lenient: a missing or unparseable value passes
+    through unchanged."""
+    if not s:
+        return s
+    try:
+        d = datetime.datetime.fromisoformat(s)
+    except (ValueError, TypeError):
+        return s
+    clock = d.strftime("%I:%M%p").lstrip("0").lower()
+    return f"{d.strftime('%B')} {d.day}, {d.year} {clock}"
+
+
+def _present_message(m: dict) -> dict:
+    """A raw message as the agent sees it: {when, sender, text}. ``sender`` is "me" for the account
+    owner. Internal identifiers (message_rowid) never leave the server."""
+    return {"when": _fmt_dt(m.get("datetime")), "sender": m.get("sender"), "text": m.get("text")}
+
+
+def _present_conversation(c: dict, *, reply_status: str, tags: list[str],
+                          live_messages: list[dict]) -> dict:
+    """One conversation as the agent sees it. ``conversation_id`` is the stable key for the other
+    tools; internal fields (chat_rowid/handle/cursors/edited stamps) are dropped; timestamps are
+    humanized. ``members`` appears only for groups; ``new_conversation`` only when true (too few
+    texts to have summaries yet)."""
+    out = {
+        "conversation_id": c["chat_rowid"],
+        "name": c["name"],
+        "is_group": c["is_group"],
+        "status": c["status"],
+        "reply_status": reply_status,
+        "last_message_at": _fmt_dt(c.get("last_message_at")),
+        "you_last_sent": _fmt_dt(c.get("last_from_me_at")),
+        "they_last_sent": _fmt_dt(c.get("last_from_them_at")),
+        "summary": c.get("summary"),
+        "identity": c.get("identity"),
+        "tags": tags,
+        "daily": c.get("daily") or [],
+        "weekly": c.get("weekly") or [],
+        "monthly": c.get("monthly"),
+        "history": c.get("history") or [],
+        "unsummarized_messages": [_present_message(m) for m in live_messages],
+    }
+    if c["is_group"]:
+        out["members"] = c.get("members")
+    if c.get("new_conversation"):
+        out["new_conversation"] = True
+    return out
+
+
 # --------------------------------------------------------------- tool logic (pure)
 def list_tags_impl(*, law_path: Optional[Union[str, Path]] = None) -> list[dict]:
-    """The active tag law — the filter vocabulary MCP clients may use. The union of the hard-coded
-    system law (choice classifications like ``reply_status``) and the watch.md user law."""
+    """The active tag vocabulary — the union of the hard-coded system law (choice classifications
+    like ``reply_status``) and the watch.md user law, presented for an agent: per entry ``tag``,
+    ``description``, ``type`` ("freeform" | "choice", choice adds ``choices``), ``defined_by``
+    ("user" | "system"), and a plain-English ``relevance``."""
     law = tagmod.full_law(tagmod.load_law(law_path))
-    return [{"slug": s.slug, "description": s.description, "lifetime": s.lifetime,
-             "ttl_days": s.ttl_days, "kind": s.kind, "choices": s.choices, "origin": s.origin}
-            for s in law.values()]
+    out = []
+    for s in law.values():
+        row = {
+            "tag": s.slug,
+            "type": s.kind,
+            "defined_by": s.origin,
+            "description": s.description,
+            "relevance": ("always relevant" if s.lifetime == "sticky" else
+                          f"relevant for ~{s.ttl_days} days after the conversation's last message"),
+        }
+        if s.kind == "choice":
+            row["choices"] = s.choices
+        out.append(row)
+    return out
 
 
 def get_context_impl(state_path: Union[str, Path], *, law_path: Optional[Union[str, Path]] = None,
@@ -70,7 +135,7 @@ def get_context_impl(state_path: Union[str, Path], *, law_path: Optional[Union[s
     state = state_io.read_state(state_path)
     law = tagmod.load_law(law_path)
     want = set(tags) if tags else None
-    out = []
+    matched = []
     for c in state.model_dump()["conversations"]:
         if c["status"] != "active" and not include_dormant:
             continue
@@ -83,14 +148,17 @@ def get_context_impl(state_path: Union[str, Path], *, law_path: Optional[Union[s
         eff = tagmod.effective_tags(c, law, as_of=as_of)
         if want is not None and not (want & set(eff)):
             continue
-        c["tags"] = eff                      # surface the effective tags, not the raw stored slugs
-        c["reply_status"] = eff_rs           # surface the decayed status, not the raw stored one
         if raw_path is not None:             # the live raw layer, derived at query time
             live = raw_store.history(c["chat_rowid"], after_rowid=c.get("summarized_through") or 0,
                                      path=raw_path)
-            c["texts_today"] = live[-texts_today_cap:] if texts_today_cap else live
-        out.append(c)
-    return {"generated_at": state.generated_at, "conversations": out}
+            live = live[-texts_today_cap:] if texts_today_cap else live
+        else:
+            live = c.get("texts_today") or []
+        matched.append((c, eff_rs, eff, live))
+    matched.sort(key=lambda t: t[0].get("last_message_at") or "", reverse=True)  # most recent first
+    return {"generated_at": _fmt_dt(state.generated_at),
+            "conversations": [_present_conversation(c, reply_status=rs, tags=eff, live_messages=lv)
+                              for c, rs, eff, lv in matched]}
 
 
 def quickscan_impl(state_path: Union[str, Path], raw_path: Optional[Union[str, Path]] = None, *,
@@ -101,31 +169,29 @@ def quickscan_impl(state_path: Union[str, Path], raw_path: Optional[Union[str, P
     unless ``include_dormant``."""
     state = state_io.read_state(state_path)
     n_by_id = raw_store.counts(path=raw_path) if raw_path is not None else {}
-    out = []
-    for c in state.conversations:
-        if c.status != "active" and not include_dormant:
-            continue
-        out.append({
-            "chat_rowid": c.chat_rowid,
-            "name": c.name,
-            "is_group": c.is_group,
-            "message_count": n_by_id.get(c.chat_rowid, 0),
-            "last_message_at": c.last_message_at,
-            "reply_status": decayed_reply_status(c.reply_status, c.last_message_at,
-                                                 decay_days=reply_decay_days or 0, as_of=as_of),
-            "summary": c.summary,
-        })
-    return out
+    rows = [c for c in state.conversations if c.status == "active" or include_dormant]
+    rows.sort(key=lambda c: c.last_message_at or "", reverse=True)   # most recent first
+    return [{
+        "conversation_id": c.chat_rowid,
+        "name": c.name,
+        "is_group": c.is_group,
+        "message_count": n_by_id.get(c.chat_rowid, 0),
+        "last_message_at": _fmt_dt(c.last_message_at),
+        "reply_status": decayed_reply_status(c.reply_status, c.last_message_at,
+                                             decay_days=reply_decay_days or 0, as_of=as_of),
+        "summary": c.summary,
+    } for c in rows]
 
 
 def get_raw_history_impl(raw_path: Union[str, Path], conversation: int, *,
                          since: Optional[str] = None, default_lookback_days: Optional[int] = None,
                          include_deleted: bool = False, now: Optional[datetime.datetime] = None) -> list[dict]:
-    """The sparing deep-dive: one conversation's recent raw messages from the raw store. With no
-    ``since`` the ``default_lookback_days`` window applies (the MCP default). Deleted/unsent messages are
-    hidden unless ``include_deleted`` is set."""
+    """The sparing deep-dive: one conversation's recent raw messages from the raw store, presented
+    as ``{when, sender, text}`` rows (oldest first). With no ``since`` the ``default_lookback_days``
+    window applies (the MCP default). Deleted/unsent messages are hidden unless ``include_deleted``."""
     since = _resolve_since(since, default_lookback_days, now)
-    return raw_store.history(conversation, since=since, include_deleted=include_deleted, path=raw_path)
+    rows = raw_store.history(conversation, since=since, include_deleted=include_deleted, path=raw_path)
+    return [_present_message(m) for m in rows]
 
 
 def update_conversation_impl(state_path: Union[str, Path], *, conversation: int, fields: dict,
@@ -150,7 +216,7 @@ def update_conversation_impl(state_path: Union[str, Path], *, conversation: int,
             target[k] = v
             target.setdefault("edited", {})[k] = stamp
         state_io.write_state(data, state_path, law=tagmod.active_slugs(law) or None)
-    return {"chat_rowid": conversation, "edited": sorted(fields)}
+    return {"conversation_id": conversation, "edited": sorted(fields)}
 
 
 def ingest_impl(payload: dict, *, raw_path: Union[str, Path]) -> int:
@@ -180,23 +246,63 @@ def build_app(config: Config, *, state_path: Union[str, Path], raw_path: Union[s
         # Each token's claims MUST carry client_id — StaticTokenVerifier builds the AccessToken with
         # token_data["client_id"], so omitting it 500s every authenticated request (KeyError).
         auth = StaticTokenVerifier(tokens={mcp_key: {"client_id": "mcp-client", "scopes": []}})
-    mcp = FastMCP("text-triage", auth=auth)
+    mcp = FastMCP("text-triage", auth=auth, instructions="""\
+text-triage maintains a curated, LLM-summarized memory of the account owner's iMessage
+conversations. You read that memory; you never see or send texts on their behalf.
 
-    @mcp.tool
-    def list_tags() -> list:
-        """List the active tag law (slug, description, lifetime, ttl_days)."""
-        return list_tags_impl(law_path=law_path)
+Recommended call order:
+1. list_available_tags — ALWAYS first: learn the tag vocabulary and the reply_status states before
+   filtering or interpreting anything.
+2. scan_conversations — the cheap triage list over every conversation.
+3. get_conversation_context — the full layered memory for the conversations that matter, filterable
+   by tags / reply_status.
+4. get_message_history — raw texts of ONE conversation; use sparingly, only when the notes aren't enough.
+5. update_conversation_memory — only when the owner explicitly corrects something.
+
+Response conventions (identical across all tools):
+- conversation_id is the stable key — pass it to get_message_history / update_conversation_memory.
+- All timestamps read like "May 7, 2026 12:35pm". Input filters (`since`) instead take ISO
+  "YYYY-MM-DD HH:MM:SS".
+- Messages are {when, sender, text}; sender "me" is the account owner.
+- reply_status is one of: needs_response (the owner owes them a reply), waiting_reply (they owe the
+  owner), standby (nothing owed either way).
+- unsummarized_messages are texts newer than the conversation's last summary — the live layer.""")
 
     lookback = config.server.mcp_default_lookback_days
 
     @mcp.tool
-    def get_context(tags: Optional[list] = None, since: Optional[str] = None,
-                    reply_status: Optional[str] = None, include_dormant: bool = False) -> dict:
-        """The layered memory for matching conversations. Tag-filtered by current relevance; active-only
-        by default. `reply_status` filters on one of: needs_response (you owe them a reply),
-        waiting_reply (they owe you one), standby (nothing owed; stale waiting_reply decays here).
-        Each match carries its live unsummarized messages in `texts_today`. With no `since`, returns
-        the last `server.mcp_default_lookback_days` days."""
+    def list_available_tags() -> list:
+        """Call this FIRST, before any other tool: the complete tag vocabulary used everywhere else.
+        Returns one entry per tag: `tag` (the value used in filters), `description`,
+        `type` ("freeform" = may appear in a conversation's tags list; "choice" = a one-of
+        classification such as reply_status, whose `choices` lists the allowed values),
+        `defined_by` ("user" tags come from the owner's watch.md; "system" tags are built in),
+        and `relevance` (when the tag applies)."""
+        return list_tags_impl(law_path=law_path)
+
+    @mcp.tool
+    def scan_conversations(include_dormant: bool = False) -> list:
+        """The fast triage list — one small row per conversation, most recent first. Use this to get
+        the lay of the land before drilling in. Each row: `conversation_id` (the key for the other
+        tools), `name`, `is_group`, `message_count` (total stored), `last_message_at`,
+        `reply_status`, and `summary` (a 1-2 line current snapshot). Conversations quiet for over a
+        month are hidden unless `include_dormant` is true."""
+        return quickscan_impl(state_path, raw_path,
+                              reply_decay_days=config.messages.reply_decay_days,
+                              include_dormant=include_dormant)
+
+    @mcp.tool
+    def get_conversation_context(tags: Optional[list] = None, since: Optional[str] = None,
+                                 reply_status: Optional[str] = None,
+                                 include_dormant: bool = False) -> dict:
+        """The full layered memory for matching conversations, most recent first. Filters:
+        `tags` (any-of, from list_available_tags), `reply_status` (one of needs_response /
+        waiting_reply / standby), `since` (ISO "YYYY-MM-DD HH:MM:SS"; without it only the last
+        ~60 days of conversations return). Each match: `conversation_id`, `name`, `reply_status`,
+        `last_message_at` / `you_last_sent` / `they_last_sent`, `summary` (1-2 lines), `identity`
+        (who they are to the owner), `tags`, the layered notes (`daily` / `weekly` / `monthly` /
+        `history` — newest understanding first-hand), and `unsummarized_messages` ({when, sender,
+        text} texts newer than the last summary). Prefer this over raw history."""
         return get_context_impl(state_path, law_path=law_path, raw_path=raw_path, tags=tags,
                                 since=since, reply_status=reply_status,
                                 include_dormant=include_dormant, default_lookback_days=lookback,
@@ -204,26 +310,25 @@ def build_app(config: Config, *, state_path: Union[str, Path], raw_path: Union[s
                                 texts_today_cap=config.server.texts_today_cap)
 
     @mcp.tool
-    def quickscan(include_dormant: bool = False) -> list:
-        """The fast triage list: per conversation — name, total message count, most-recent message
-        time, reply_status (needs_response / waiting_reply / standby), and the 1-2 line summary."""
-        return quickscan_impl(state_path, raw_path,
-                              reply_decay_days=config.messages.reply_decay_days,
-                              include_dormant=include_dormant)
-
-    @mcp.tool
-    def get_raw_history(conversation: int, since: Optional[str] = None,
-                        include_deleted: bool = False) -> list:
-        """One conversation's recent raw messages (the deep-dive when the notes aren't enough). With no
-        `since`, returns the last `server.mcp_default_lookback_days` days. Deleted/unsent messages are
+    def get_message_history(conversation_id: int, since: Optional[str] = None,
+                            include_deleted: bool = False) -> list:
+        """The raw text messages of ONE conversation — the deep dive for when the summarized context
+        isn't enough. Returns {when, sender, text} rows, oldest first; sender "me" is the account
+        owner; "[Reacted: ...]" rows are tapbacks, not substantive messages. `since` is ISO
+        "YYYY-MM-DD HH:MM:SS" (without it, only the last ~60 days). Messages the owner deleted are
         hidden unless `include_deleted` is true."""
-        return get_raw_history_impl(raw_path, conversation, since=since, default_lookback_days=lookback,
+        return get_raw_history_impl(raw_path, conversation_id, since=since,
+                                    default_lookback_days=lookback,
                                     include_deleted=include_deleted)
 
     @mcp.tool
-    def update_conversation(conversation: int, fields: dict) -> dict:
-        """Correct a conversation's identity/monthly/weekly/history/tags; stamps ``edited``."""
-        return update_conversation_impl(state_path, conversation=conversation, fields=fields,
+    def update_conversation_memory(conversation_id: int, fields: dict) -> dict:
+        """Correct a conversation's stored memory when the OWNER says it's wrong — never on your own
+        judgment. `fields` may set: `identity` (str, <= 3 sentences), `monthly` (str), `weekly` /
+        `history` (lists of dated notes), or `tags` (a FULL replacement list; every value must come
+        from list_available_tags). Edited fields are stamped so future summaries never overwrite
+        them. Returns {conversation_id, edited}."""
+        return update_conversation_impl(state_path, conversation=conversation_id, fields=fields,
                                         law_path=law_path)
 
     @mcp.custom_route("/ingest", methods=["POST"])
