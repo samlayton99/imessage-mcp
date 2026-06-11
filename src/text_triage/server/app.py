@@ -118,6 +118,7 @@ def list_tags_impl(*, law_path: Optional[Union[str, Path]] = None) -> list[dict]
 
 def get_context_impl(state_path: Union[str, Path], *, law_path: Optional[Union[str, Path]] = None,
                      raw_path: Optional[Union[str, Path]] = None,
+                     conversation_id: Optional[int] = None,
                      tags: Optional[list[str]] = None, since: Optional[str] = None,
                      reply_status: Optional[str] = None, include_dormant: bool = False,
                      default_lookback_days: Optional[int] = None,
@@ -131,12 +132,16 @@ def get_context_impl(state_path: Union[str, Path], *, law_path: Optional[Union[s
     newer than its ``summarized_through`` cursor, newest ``texts_today_cap`` kept); without one the
     stored field passes through. ``since`` keeps conversations whose ``last_message_at`` is at/after
     that moment; with no ``since`` the ``default_lookback_days`` window applies (the MCP default)."""
+    if conversation_id is not None:          # a direct fetch by key: no windowing, dormant included
+        since, default_lookback_days, include_dormant = None, None, True
     since = _resolve_since(since, default_lookback_days, as_of)
     state = state_io.read_state(state_path)
     law = tagmod.load_law(law_path)
     want = set(tags) if tags else None
     matched = []
     for c in state.model_dump()["conversations"]:
+        if conversation_id is not None and c["chat_rowid"] != conversation_id:
+            continue
         if c["status"] != "active" and not include_dormant:
             continue
         eff_rs = decayed_reply_status(c["reply_status"], c.get("last_message_at"),
@@ -292,18 +297,22 @@ Response conventions (identical across all tools):
                               include_dormant=include_dormant)
 
     @mcp.tool
-    def get_conversation_context(tags: Optional[list] = None, since: Optional[str] = None,
+    def get_conversation_context(conversation_id: Optional[int] = None,
+                                 tags: Optional[list] = None, since: Optional[str] = None,
                                  reply_status: Optional[str] = None,
                                  include_dormant: bool = False) -> dict:
-        """The full layered memory for matching conversations, most recent first. Filters:
-        `tags` (any-of, from list_available_tags), `reply_status` (one of needs_response /
-        waiting_reply / standby), `since` (ISO "YYYY-MM-DD HH:MM:SS"; without it only the last
-        ~60 days of conversations return). Each match: `conversation_id`, `name`, `reply_status`,
-        `last_message_at` / `you_last_sent` / `they_last_sent`, `summary` (1-2 lines), `identity`
-        (who they are to the owner), `tags`, the layered notes (`daily` / `weekly` / `monthly` /
-        `history` — newest understanding first-hand), and `unsummarized_messages` ({when, sender,
-        text} texts newer than the last summary). Prefer this over raw history."""
-        return get_context_impl(state_path, law_path=law_path, raw_path=raw_path, tags=tags,
+        """The full layered memory for conversations, most recent first. Two ways to call it:
+        pass `conversation_id` (from scan_conversations) to fetch ONE conversation directly —
+        no other filters needed — or filter the whole set with `tags` (any-of, values from
+        list_available_tags), `reply_status` (needs_response / waiting_reply / standby), and
+        `since` (ISO "YYYY-MM-DD HH:MM:SS"; without it only the last ~60 days return). Each
+        match: `conversation_id`, `name`, `reply_status`, `last_message_at` / `you_last_sent` /
+        `they_last_sent`, `summary` (1-2 lines), `identity` (who they are to the owner), `tags`,
+        the layered notes (`daily` / `weekly` / `monthly` / `history`), and
+        `unsummarized_messages` ({when, sender, text} texts newer than the last summary).
+        Prefer this over get_message_history."""
+        return get_context_impl(state_path, law_path=law_path, raw_path=raw_path,
+                                conversation_id=conversation_id, tags=tags,
                                 since=since, reply_status=reply_status,
                                 include_dormant=include_dormant, default_lookback_days=lookback,
                                 reply_decay_days=config.messages.reply_decay_days,

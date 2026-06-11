@@ -328,11 +328,15 @@ async def _summarize(mode: str, export: dict, *, engine: Engine, config: Optiona
     async def _slot(idx, skel):
         cid = skel["chat_rowid"]
         prev = prev_by_id.get(cid)
+        # Skipped-but-present conversations (cost cap / delta gate) still REFRESH their deterministic
+        # facts from the new messages — the gate, last_message_at, the reply metadata — while keeping
+        # the agent-authored memory and the summary cursor (_carry). Returning prev verbatim left a
+        # stale reply_status standing after you texted someone the gate then skipped.
         if limit is not None and idx >= limit:                  # cost cap: no LLM call beyond limit
-            return (prev if prev else dict(skel)), cid
+            return _carry(skel, prev), cid
         nc = new_count_by_id.get(cid)
         if gate and nc is not None and nc < floor:              # delta gate: too few new msgs -> ride raw
-            return (prev if prev else dict(skel)), cid
+            return _carry(skel, prev), cid
         async with sem:
             rec = await _run_one(mode, skel, raw_by_id.get(cid, []), prev,
                                  engine=engine, config=config, law=law, law_slugs=law_slugs,

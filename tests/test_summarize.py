@@ -285,16 +285,24 @@ def test_gate_refreshes_reply_status_when_llm_is_silent():
     assert s.conversations[0].reply_status == "needs_response"
 
 
-def test_skipped_conversation_keeps_prior_reply_status():
-    """A delta-gated skip carries the prior record verbatim (cursor, facts, and status all wait
-    for a real summary)."""
+def test_skipped_conversation_refreshes_facts_but_keeps_memory():
+    """A delta-gated skip keeps the agent-authored memory (summary/notes/cursor) but refreshes the
+    DETERMINISTIC facts from the new messages — the gate, last_message_at, the reply metadata. The
+    bug this kills: you text someone, daily skips the low-traffic thread, and it kept presenting a
+    stale needs_response even though the last message is now yours."""
     cfg = Config(messages={"summarize_floor": 5})
-    low = conv(chat_rowid=1, messages=[msg(rowid=1)])
+    low = conv(chat_rowid=1, responded=True,                      # I sent last -> gate: waiting_reply
+               messages=[msg(rowid=99, dt="2026-06-02 08:00", sender="me", text="hi cutie")])
     low["new_count"], low["text_count"] = 1, 50
-    prev = prev_state([prev_record(chat_rowid=1, reply_status="standby", summary="On standby.")])
+    prev = prev_state([prev_record(chat_rowid=1, reply_status="needs_response", summary="Kept.",
+                                   summarized_through=42, last_from="them",
+                                   daily=[{"date": "2026-06-01", "text": "note"}])])
     s = summarize_daily(export_with([low]), engine=StubEngine([]), config=cfg, prev_state=prev, law=LAW)
     c = s.conversations[0]
-    assert c.reply_status == "standby" and c.summary == "On standby."
+    assert c.reply_status == "waiting_reply"                      # fresh gate, not the stale value
+    assert c.last_message_at == "2026-06-02 08:00"                # fresh fact
+    assert c.summary == "Kept." and [n.text for n in c.daily] == ["note"]   # memory kept
+    assert c.summarized_through == 42                             # cursor did NOT advance (still owed a summary)
 
 
 # ----------------------------------------------------------------- summary (the one-liner)

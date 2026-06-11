@@ -124,7 +124,13 @@ available with descriptions.
 
 ### MCP features
 - **[near] `quickscan` tool** — returns, per conversation: name, total message count, most-recent message
-  time, and the 1-2 line short summary. A fast triage list.
+  time, and the 1-2 line short summary. A fast triage list. (BUILT as `scan_conversations`.)
+- **[near] Per-message sender identifiers** — from Poke dogfooding: group-chat senders are display-name
+  strings only, so an agent matching "Braden Hancock" to an email for scheduling is doing name-matching
+  by vibes. Store the raw sender handle alongside the display name (extractor + raw store) and surface
+  a `sender_id` / the 1:1 `handle` over MCP. (Declined from the same feedback: raw ISO timestamps next
+  to the humanized ones — humanized-only is the deliberate presentation; revisit only if an agent
+  genuinely needs time arithmetic.)
 - **[future] MCP correction loop** — when the interpreter tags something wrong, the user corrects it
   through the MCP and that feedback flows back (into the interpreter and into `state.json`) so it stops
   repeating the mistake. This *will* be built — it's how steering works in practice — just post-v1; builds

@@ -133,6 +133,16 @@ def test_get_context_reply_status_filter(tmp_path):
     assert {c["conversation_id"] for c in out["conversations"]} == {10}
 
 
+def test_get_context_by_conversation_id_ignores_lookback_and_dormancy(tmp_path):
+    """An explicit conversation_id is a direct fetch: it returns that one conversation even if it is
+    dormant or older than the default look-back window (the agent asked for it by key)."""
+    out = app.get_context_impl(_state(tmp_path), law_path=_law(tmp_path), conversation_id=30,
+                               default_lookback_days=7, as_of=AS_OF)   # dormant AND 60d old
+    assert [c["conversation_id"] for c in out["conversations"]] == [30]
+    out = app.get_context_impl(_state(tmp_path), law_path=_law(tmp_path), conversation_id=999, as_of=AS_OF)
+    assert out["conversations"] == []                                  # unknown id: empty, not an error
+
+
 # -------------------------------------------------------- reply_status query-time decay
 def test_get_context_decays_stale_waiting_reply_to_standby(tmp_path):
     """Mom's waiting_reply is 17 days old; with a 7-day decay it presents as standby — in the
