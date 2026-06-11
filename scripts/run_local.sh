@@ -6,8 +6,12 @@
 #                                  then sweep any orphans (survives a killed script / lost pidfiles)
 #   scripts/run_local.sh status    what's running + the public URL
 #   scripts/run_local.sh url       print the public MCP URL (what you give Poke)
+#   scripts/run_local.sh key       print the MCP auth token (the other thing you give Poke)
 #   scripts/run_local.sh restart   stop + start
 #   scripts/run_local.sh logs      tail -f all logs
+#
+# start SELF-PROVISIONS the public surface: it generates a TEXT_TRIAGE_MCP_KEY into .env if one is
+# missing and brew-installs cloudflared if absent — `scripts/run_local.sh restart` is the whole story.
 #
 # The three processes:
 #   serve         — the server: MCP over HTTP + /ingest + the cadence scheduler (owns state.json)
@@ -108,6 +112,16 @@ do_url() {
     fi
 }
 
+do_key() {
+    local key; key="$(env_get TEXT_TRIAGE_MCP_KEY || true)"
+    if [[ -n "$key" ]]; then
+        echo "$key"
+    else
+        echo "no TEXT_TRIAGE_MCP_KEY in .env yet — scripts/run_local.sh start generates one" >&2
+        exit 1
+    fi
+}
+
 # ------------------------------------------------------------------------- tunnel
 start_tunnel() {
     local port="${BIND##*:}"
@@ -189,6 +203,20 @@ EOF
         echo "      System Settings > Privacy & Security > Full Disk Access, then restart it." >&2
     }
 
+    # ---- self-provision the public surface (BEFORE serve starts, so the key is actually enforced)
+    if [[ -z "$(env_get TEXT_TRIAGE_MCP_KEY || true)" ]]; then
+        local envf="$REPO/.env"
+        [[ ! -f "$envf" && -f "$HOME/.text-triage/.env" ]] && envf="$HOME/.text-triage/.env"
+        echo "TEXT_TRIAGE_MCP_KEY=$(openssl rand -hex 24)" >> "$envf"
+        echo "generated TEXT_TRIAGE_MCP_KEY in $envf — 'scripts/run_local.sh key' prints it (give it to Poke)"
+    fi
+    if ! command -v cloudflared >/dev/null 2>&1; then
+        if command -v brew >/dev/null 2>&1; then
+            echo "installing cloudflared (one-time, via brew — takes a minute)..."
+            brew install cloudflared || echo "WARN: brew install cloudflared failed — no public URL this run" >&2
+        fi
+    fi
+
     BIND="$("$PY" -c "from text_triage.config import load_config; print(load_config().server.bind)")"
     HEALTH_URL="http://${BIND/0.0.0.0/127.0.0.1}/health"
     mkdir -p "$LOGS" "$RUN"
@@ -244,8 +272,9 @@ case "${1:-start}" in
     stop)    do_stop ;;
     status)  do_status ;;
     url)     do_url ;;
+    key)     do_key ;;
     restart) do_stop; do_start ;;
     logs)    mkdir -p "$LOGS"; touch "$LOGS/server.log" "$LOGS/collector.log" "$LOGS/tunnel.log"
              exec tail -f "$LOGS/server.log" "$LOGS/collector.log" "$LOGS/tunnel.log" ;;
-    *)       echo "usage: $0 {start|stop|status|url|restart|logs}" >&2; exit 2 ;;
+    *)       echo "usage: $0 {start|stop|status|url|key|restart|logs}" >&2; exit 2 ;;
 esac
