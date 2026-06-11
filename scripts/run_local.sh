@@ -1,20 +1,33 @@
 #!/usr/bin/env bash
 # run_local.sh — the full text-triage stack on ONE machine (your laptop now; the Mac mini later).
 #
-#   scripts/run_local.sh start     start both halves DETACHED (the default with no argument)
-#   scripts/run_local.sh stop      kill both cleanly: TERM by recorded PID -> wait -> KILL, then
-#                                  sweep any orphaned text_triage.cli processes (survives a killed
-#                                  script / lost pidfiles)
-#   scripts/run_local.sh status    are they running?
+#   scripts/run_local.sh start     start everything DETACHED (the default with no argument)
+#   scripts/run_local.sh stop      kill everything cleanly: TERM by recorded PID -> wait -> KILL,
+#                                  then sweep any orphans (survives a killed script / lost pidfiles)
+#   scripts/run_local.sh status    what's running + the public URL
+#   scripts/run_local.sh url       print the public MCP URL (what you give Poke)
 #   scripts/run_local.sh restart   stop + start
-#   scripts/run_local.sh logs      tail -f both logs
+#   scripts/run_local.sh logs      tail -f all logs
 #
-# The two halves:
+# The three processes:
 #   serve         — the server: MCP over HTTP + /ingest + the cadence scheduler (owns state.json)
 #   push --watch  — the collector: polls chat.db every live.interval_seconds, pushes raw to /ingest
+#   cloudflared   — the public tunnel, so MCP clients (Poke) can reach /mcp from the internet.
+#                   Started ONLY if TEXT_TRIAGE_MCP_KEY is set in .env (never expose an open server).
 #
-# Topology is the conditions.yaml `server.url` knob: blank = this machine (what this script assumes).
-# Logs: ~/.text-triage/logs/{server,collector}.log · PIDs: ~/.text-triage/run/*.pid.
+# Tunnel modes:
+#   default — a Cloudflare QUICK tunnel: zero setup, but the https://….trycloudflare.com URL is
+#             REGENERATED on every start (update it in Poke after a restart; `url` prints it).
+#   persistent — needs a domain on Cloudflare (one-time, in a real browser):
+#             cloudflared tunnel login
+#             cloudflared tunnel create text-triage
+#             cloudflared tunnel route dns text-triage triage.yourdomain.com
+#         then add to .env:
+#             TEXT_TRIAGE_TUNNEL_NAME=text-triage
+#             TEXT_TRIAGE_PUBLIC_URL=https://triage.yourdomain.com
+#         and the script runs the named tunnel instead — same URL forever.
+#
+# Logs: ~/.text-triage/logs/{server,collector,tunnel}.log · PIDs/URL: ~/.text-triage/run/.
 # For boot persistence on a Mac mini, wrap `start` in a launchd agent later — nothing else changes.
 set -euo pipefail
 
@@ -29,10 +42,23 @@ alive() {  # alive <pidfile> -> 0 if the recorded process is running
     [[ -f "$f" ]] && kill -0 "$(cat "$f")" 2>/dev/null
 }
 
+env_get() {  # env_get <VAR> -> its value from .env (repo overrides home, like the CLI), else fail
+    local var="$1" f line
+    for f in "$REPO/.env" "$HOME/.text-triage/.env"; do
+        [[ -f "$f" ]] || continue
+        line="$(grep -E "^${var}=" "$f" 2>/dev/null | tail -1 || true)"
+        if [[ -n "$line" ]]; then
+            printf '%s' "${line#*=}"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # --------------------------------------------------------------------------- stop
 do_stop() {
     local killed=0
-    for name in collector server; do            # collector first: stop the pusher before its target
+    for name in tunnel collector server; do     # outermost first: tunnel, then pusher, then server
         local f="$RUN/$name.pid"
         if alive "$f"; then
             local pid; pid="$(cat "$f")"
@@ -50,22 +76,82 @@ do_stop() {
         fi
         rm -f "$f"
     done
+    rm -f "$RUN/tunnel.url"
     # Sweep: catch processes orphaned by a killed script / stale or missing pidfiles. Matches only
-    # this repo's module invocations, so other python processes are never touched.
+    # this stack's invocations, so other python processes are never touched.
     if pkill -f "text_triage.cli serve" 2>/dev/null; then echo "swept an orphaned server"; killed=1; fi
     if pkill -f "text_triage.cli push --watch" 2>/dev/null; then echo "swept an orphaned collector"; killed=1; fi
+    if pkill -f "cloudflared tunnel" 2>/dev/null; then echo "swept an orphaned tunnel"; killed=1; fi
     [[ "$killed" == 1 ]] || echo "nothing was running"
 }
 
 # ------------------------------------------------------------------------- status
 do_status() {
-    for name in server collector; do
+    for name in server collector tunnel; do
         if alive "$RUN/$name.pid"; then
             echo "$name: running (pid $(cat "$RUN/$name.pid"))"
         else
             echo "$name: not running"
         fi
     done
+    if [[ -f "$RUN/tunnel.url" ]]; then
+        echo "public MCP URL: $(cat "$RUN/tunnel.url")/mcp"
+    fi
+}
+
+do_url() {
+    if [[ -f "$RUN/tunnel.url" ]] && alive "$RUN/tunnel.pid"; then
+        echo "$(cat "$RUN/tunnel.url")/mcp"
+    else
+        echo "no tunnel running — scripts/run_local.sh start (and check 'status')" >&2
+        exit 1
+    fi
+}
+
+# ------------------------------------------------------------------------- tunnel
+start_tunnel() {
+    local port="${BIND##*:}"
+    if ! command -v cloudflared >/dev/null 2>&1; then
+        echo "WARN: cloudflared not installed — no public URL, Poke can't reach this server." >&2
+        echo "      brew install cloudflared    then: scripts/run_local.sh restart" >&2
+        return 0
+    fi
+    if ! env_get TEXT_TRIAGE_MCP_KEY >/dev/null || [[ -z "$(env_get TEXT_TRIAGE_MCP_KEY)" ]]; then
+        echo "WARN: TEXT_TRIAGE_MCP_KEY is not set in .env — refusing to open a PUBLIC tunnel to an" >&2
+        echo "      unauthenticated MCP server. Set one and restart:" >&2
+        echo "        echo \"TEXT_TRIAGE_MCP_KEY=\$(openssl rand -hex 24)\" >> $REPO/.env" >&2
+        echo "        scripts/run_local.sh restart" >&2
+        return 0
+    fi
+
+    : > "$LOGS/tunnel.log"
+    rm -f "$RUN/tunnel.url"
+    local name; name="$(env_get TEXT_TRIAGE_TUNNEL_NAME || true)"
+    if [[ -n "$name" ]]; then                    # persistent named tunnel (stable URL)
+        nohup cloudflared tunnel run --url "http://127.0.0.1:$port" "$name" >>"$LOGS/tunnel.log" 2>&1 &
+        echo $! > "$RUN/tunnel.pid"
+        local public; public="$(env_get TEXT_TRIAGE_PUBLIC_URL || true)"
+        if [[ -n "$public" ]]; then
+            echo "${public%/}" > "$RUN/tunnel.url"
+        else
+            echo "WARN: TEXT_TRIAGE_TUNNEL_NAME is set but TEXT_TRIAGE_PUBLIC_URL is not — add it to .env" >&2
+        fi
+    else                                         # quick tunnel (URL changes every start)
+        nohup cloudflared tunnel --url "http://127.0.0.1:$port" >>"$LOGS/tunnel.log" 2>&1 &
+        echo $! > "$RUN/tunnel.pid"
+        local url=""
+        for _ in $(seq 1 30); do                 # the URL appears in the log within a few seconds
+            url="$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' "$LOGS/tunnel.log" 2>/dev/null | head -1 || true)"
+            [[ -n "$url" ]] && break
+            alive "$RUN/tunnel.pid" || break
+            sleep 0.5
+        done
+        if [[ -n "$url" ]]; then
+            echo "$url" > "$RUN/tunnel.url"
+        else
+            echo "WARN: tunnel started but no URL appeared — tail $LOGS/tunnel.log" >&2
+        fi
+    fi
 }
 
 # -------------------------------------------------------------------------- start
@@ -134,10 +220,21 @@ EOF
     COLLECTOR_PID=$!
     echo "$COLLECTOR_PID" > "$RUN/collector.pid"
 
+    # ---- public tunnel (detached; only with an MCP key — see start_tunnel)
+    start_tunnel
+
     echo "text-triage running in the background:"
     echo "  server    pid=$SERVER_PID  on http://$BIND  (MCP at /mcp)"
     echo "  collector pid=$COLLECTOR_PID  polling chat.db"
-    echo "  logs      $LOGS/server.log  $LOGS/collector.log"
+    if [[ -f "$RUN/tunnel.url" ]]; then
+        echo "  public    $(cat "$RUN/tunnel.url")/mcp"
+        echo "            ^ give Poke this URL + your TEXT_TRIAGE_MCP_KEY as the auth token"
+        if [[ -z "$(env_get TEXT_TRIAGE_TUNNEL_NAME || true)" ]]; then
+            echo "            (quick tunnel: this URL CHANGES on every start — 'url' reprints it;"
+            echo "             see the header of this script for the persistent-URL setup)"
+        fi
+    fi
+    echo "  logs      $LOGS/{server,collector,tunnel}.log"
     echo "  stop with:    scripts/run_local.sh stop"
     echo "  watch logs:   scripts/run_local.sh logs"
 }
@@ -146,7 +243,9 @@ case "${1:-start}" in
     start)   do_start ;;
     stop)    do_stop ;;
     status)  do_status ;;
+    url)     do_url ;;
     restart) do_stop; do_start ;;
-    logs)    exec tail -f "$LOGS/server.log" "$LOGS/collector.log" ;;
-    *)       echo "usage: $0 {start|stop|status|restart|logs}" >&2; exit 2 ;;
+    logs)    mkdir -p "$LOGS"; touch "$LOGS/server.log" "$LOGS/collector.log" "$LOGS/tunnel.log"
+             exec tail -f "$LOGS/server.log" "$LOGS/collector.log" "$LOGS/tunnel.log" ;;
+    *)       echo "usage: $0 {start|stop|status|url|restart|logs}" >&2; exit 2 ;;
 esac
