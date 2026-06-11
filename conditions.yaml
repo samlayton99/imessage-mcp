@@ -16,6 +16,8 @@ messages:
   backfill_years: 3               # how far back the collector mirrors a conversation's full history on admission
   summarize_floor: 5              # SUMMARIZE: daily skips a conversation with fewer than this many NEW
                                   # messages since its last summary (it stays in raw history). 0 = no gate.
+  reply_decay_days: 7             # REPLY DECAY: a waiting_reply older than this many days presents as
+                                  # standby at query time (nothing owed once the thread goes quiet). 0 = never.
 
 # ── 2. MODELS & BILLING ─ who runs each summary, and how you pay ─────────────
 engine:
@@ -49,6 +51,8 @@ server:
     monthly: ["1 03:00"]
   bootstrap_limit: 0              # caps conversations per UNATTENDED summary run (scheduler + /trigger),
                                   # incl. the one-time bootstrap monthly. Set low (e.g. 20) for cheap dev testing. 0 = uncapped.
+  texts_today_cap: 25             # LIVE RAW: get_context derives each match's texts_today from the raw store
+                                  # (messages newer than its summary cursor); keep only the newest N. 0 = uncapped.
   live:
     mode: interval                # interval = poll every N s | watch = FSEvents (later)
     interval_seconds: 30

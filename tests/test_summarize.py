@@ -39,25 +39,29 @@ def export_with(convs, generated_at="2026-06-02 09:00", watermark=None, unrespon
             "conversations": convs, "unresponded": unresponded or []}
 
 
-def daily_json(daily_note="Asked to meet Thursday.", tags=None):
-    return json.dumps({"daily_note": daily_note, "tags": tags if tags is not None else []})
+def daily_json(daily_note="Asked to meet Thursday.", tags=None, summary=None, reply_status=None):
+    return json.dumps({"daily_note": daily_note, "tags": tags if tags is not None else [],
+                       "summary": summary, "reply_status": reply_status})
 
 
-def weekly_json(weekly_note="Quiet week; one scheduling thread.", identity=None, tags=None):
+def weekly_json(weekly_note="Quiet week; one scheduling thread.", identity=None, tags=None,
+                summary=None, reply_status=None):
     return json.dumps({"identity": identity, "weekly_note": weekly_note,
-                       "tags": tags if tags is not None else []})
+                       "tags": tags if tags is not None else [],
+                       "summary": summary, "reply_status": reply_status})
 
 
 def monthly_json(monthly="Spent the month planning.", history_line="2026-06: planning.",
-                 identity=None, tags=None):
+                 identity=None, tags=None, summary=None, reply_status=None):
     return json.dumps({"identity": identity, "monthly": monthly, "history_line": history_line,
-                       "tags": tags if tags is not None else []})
+                       "tags": tags if tags is not None else [],
+                       "summary": summary, "reply_status": reply_status})
 
 
 def prev_record(chat_rowid=1, name="Avery Quinn", handle="+15550000201", **over):
     base = {"chat_rowid": chat_rowid, "name": name, "is_group": False, "handle": handle,
             "members": None, "status": "active", "last_from": "them",
-            "last_message_at": "2026-06-01 10:00", "needs_reply": True, "texts_today": [],
+            "last_message_at": "2026-06-01 10:00", "reply_status": "needs_response", "texts_today": [],
             "identity": "A friend.", "tags": [], "daily": [], "weekly": [], "monthly": None,
             "history": [], "edited": {}}
     base.update(over)
@@ -160,7 +164,7 @@ def test_daily_two_failures_fall_back_to_prior_record():
 def test_prev_only_conversation_carried_forward():
     eng = StubEngine([daily_json()])
     prev = prev_state([prev_record(chat_rowid=999, name="Old", handle="+15550009999",
-                                   monthly="carried", last_from="me", needs_reply=False)])
+                                   monthly="carried", last_from="me", reply_status="waiting_reply")])
     s = summarize_daily(export_with([conv(chat_rowid=1)]), engine=eng, config=Config(),
                         prev_state=prev, law=LAW)
     assert len(eng.calls) == 1
@@ -248,6 +252,93 @@ def test_daily_no_new_count_means_no_gate():
     s = summarize_daily(export_with([conv()]), engine=StubEngine([daily_json()]),
                         config=Config(messages={"summarize_floor": 999}), law=LAW)
     assert len(s.conversations[0].daily) == 1              # summarized despite a huge floor (no new_count)
+
+
+# ------------------------------------------------------- reply_status (LLM judgment over the gate)
+def test_llm_reply_status_overrides_the_gate_per_mode():
+    """conv() is 1:1, last from them -> gate says needs_response; the LLM may judge it standby."""
+    for fn, payload in ((summarize_daily, daily_json(reply_status="standby")),
+                        (summarize_weekly, weekly_json(reply_status="standby")),
+                        (summarize_monthly, monthly_json(reply_status="standby"))):
+        s = fn(export_with([conv()]), engine=StubEngine([payload]), config=Config(), law=LAW)
+        assert s.conversations[0].reply_status == "standby"
+
+
+def test_null_reply_status_keeps_the_gate_value():
+    s = summarize_daily(export_with([conv(responded=True)]),
+                        engine=StubEngine([daily_json(reply_status=None)]), config=Config(), law=LAW)
+    assert s.conversations[0].reply_status == "waiting_reply"   # gate value, 1:1 I sent last
+
+
+def test_invalid_reply_status_is_sanitized_not_retried():
+    eng = StubEngine([daily_json(reply_status="shouting")])
+    s = summarize_daily(export_with([conv()]), engine=eng, config=Config(), law=LAW)
+    assert len(eng.calls) == 1                                  # sanitized, no retry burned
+    assert s.conversations[0].reply_status == "needs_response"  # falls back to the gate
+
+
+def test_gate_refreshes_reply_status_when_llm_is_silent():
+    """The fresh deterministic gate (not the stale prior) is the base every real run."""
+    prev = prev_state([prev_record(reply_status="standby")])    # LLM judged standby yesterday
+    s = summarize_daily(export_with([conv(responded=False)]),   # but they texted again
+                        engine=StubEngine([daily_json()]), config=Config(), prev_state=prev, law=LAW)
+    assert s.conversations[0].reply_status == "needs_response"
+
+
+def test_skipped_conversation_keeps_prior_reply_status():
+    """A delta-gated skip carries the prior record verbatim (cursor, facts, and status all wait
+    for a real summary)."""
+    cfg = Config(messages={"summarize_floor": 5})
+    low = conv(chat_rowid=1, messages=[msg(rowid=1)])
+    low["new_count"], low["text_count"] = 1, 50
+    prev = prev_state([prev_record(chat_rowid=1, reply_status="standby", summary="On standby.")])
+    s = summarize_daily(export_with([low]), engine=StubEngine([]), config=cfg, prev_state=prev, law=LAW)
+    c = s.conversations[0]
+    assert c.reply_status == "standby" and c.summary == "On standby."
+
+
+# ----------------------------------------------------------------- summary (the one-liner)
+def test_every_mode_rewrites_the_summary():
+    for fn, payload in ((summarize_daily, daily_json(summary="New snapshot.")),
+                        (summarize_weekly, weekly_json(summary="New snapshot.")),
+                        (summarize_monthly, monthly_json(summary="New snapshot."))):
+        prev = prev_state([prev_record(summary="Old snapshot.")])
+        s = fn(export_with([conv()]), engine=StubEngine([payload]), config=Config(),
+               prev_state=prev, law=LAW)
+        assert s.conversations[0].summary == "New snapshot."
+
+
+def test_blank_summary_keeps_the_previous_one():
+    prev = prev_state([prev_record(summary="Kept snapshot.")])
+    s = summarize_daily(export_with([conv()]), engine=StubEngine([daily_json(summary=None)]),
+                        config=Config(), prev_state=prev, law=LAW)
+    assert s.conversations[0].summary == "Kept snapshot."
+
+
+# ------------------------------------------------------------- deterministic reply metadata
+def test_metadata_comes_from_skeleton_and_falls_back_to_prev():
+    messages = [msg(rowid=1, dt="2026-06-01 09:00", sender="me", text="hi"),
+                msg(rowid=2, dt="2026-06-01 10:00", sender="Avery Quinn", text="yo")]
+    s = summarize_daily(export_with([conv(messages=messages)]), engine=StubEngine([daily_json()]),
+                        config=Config(), law=LAW)
+    c = s.conversations[0]
+    assert c.last_from_me_at == "2026-06-01 09:00" and c.last_from_them_at == "2026-06-01 10:00"
+
+    # a delta window with only their messages: my side carries from the previous record
+    prev = prev_state([prev_record(last_from_me_at="2026-05-30 08:00")])
+    s = summarize_daily(export_with([conv()]), engine=StubEngine([daily_json()]),
+                        config=Config(), prev_state=prev, law=LAW)
+    c = s.conversations[0]
+    assert c.last_from_me_at == "2026-05-30 08:00"              # carried
+    assert c.last_from_them_at == "2026-06-01 10:00"            # fresh from the window
+
+
+# ------------------------------------------------------- who_am_i + today in the context
+def test_build_contexts_injects_today_and_who_am_i():
+    ctxs = build_contexts("daily", export_with([conv()], generated_at="2026-06-02 09:00"),
+                          config=Config(), law=LAW, who_am_i="Sam, a grad student.")
+    assert "Today is 2026-06-02 09:00." in ctxs[0]["system"]
+    assert "Sam, a grad student." in ctxs[0]["system"]
 
 
 # ------------------------------------------------------------------------------ weekly

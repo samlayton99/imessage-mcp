@@ -51,16 +51,27 @@ independent of the repo's `conditions.yaml` and `watch.md` — never depend on t
   `agents/*.md` (each call = system [shared `_global` frame + per-agent role] + user [per-conversation
   data]) · `skeleton` (deterministic facts) · `summarize` (daily/weekly/monthly agents, async+parallel;
   assemble → validate → one retry → never land invalid; `build_contexts`/`--show-context`;
-  `--source {chatdb,raw-store}`) · `tags` (watch.md → tag law with lifetimes + `effective_tags`).
-- **`state/`** (the typechecked record): `schema` (Pydantic state.json contract; no rolling `summary`,
-  no list caps, `texts_today` per record) · `state_io` (atomic write+flock; the single owner).
+  `--source {chatdb,raw-store}`; every agent also rewrites the 1-2 line `summary` + may judge
+  `reply_status`) · `tags` (watch.md [3 sections: Who am I / What to watch / What I care about] →
+  user tag law with lifetimes; `SYSTEM_LAW` [the `reply_status` choice classification] unioned in by
+  `full_law`; `effective_tags` at query time).
+- **`state/`** (the typechecked record): `schema` (Pydantic state.json contract; `reply_status`
+  3-state [standby/waiting_reply/needs_response, replaces the old `needs_reply` bool — legacy files
+  migrate on read]; 1-2 line `summary`; `last_from_me_at`/`last_from_them_at`; no list caps;
+  `texts_today` per record [stored empty — derived live from the raw store at MCP read]) ·
+  `state_io` (atomic write+flock; the single owner).
 - **`server/`** (the always-on host — a VPS or an always-on Mac mini): `raw_store`
-  (`raw_messages.sqlite`: ingest/history/export/prune; rebuilds the extractor's export shape) · `app`
-  (FastMCP over HTTP — tools `list_tags`/`get_context`/`get_raw_history`/`update_conversation` + routes
-  `/ingest` `/trigger` `/health`; fastmcp lazy-imported, the `server` extra) · `scheduler` (cadence
-  date-math; spawns `summarize --source raw-store` as a subprocess).
+  (`raw_messages.sqlite`: ingest/history/counts/export/prune; rebuilds the extractor's export shape) ·
+  `app` (FastMCP over HTTP — tools `list_tags`/`quickscan`/`get_context`/`get_raw_history`/
+  `update_conversation` + routes `/ingest` `/trigger` `/health`; fastmcp lazy-imported, the `server`
+  extra; `reply_status` decay computed at query time) · `scheduler` (cadence date-math; spawns
+  `summarize --source raw-store` as a subprocess).
 - **top-level:** `config` (conditions.yaml → `messages`/`engine`/`server`; secrets in `.env`) · `cli`
   (`extract`/`summarize`/`serve`/`push`; loads `.env`).
+
+**Run it all locally (laptop now = Mac mini later):** `scripts/run_local.sh` — starts `serve`
+(MCP + scheduler) + `push --watch` (collector) on loopback, logs to `~/.text-triage/logs/`,
+Ctrl-C stops both. Needs fastmcp+litellm in the venv and FDA on the terminal running it.
 
 Two processes, one split: the **collector** (`collect/`) pushes raw to the **server** (`server/`) —
 same box on a Mac mini (loopback), or laptop→VPS (HTTPS), switched by the single knob `server.url`.

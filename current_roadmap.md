@@ -2,10 +2,14 @@
 
 Path from "built + tested" to "anyone can install it." Ordered by what gates a clean v1 release.
 
-**Status:** full pipeline built, 203 tests green, runs end-to-end on the real chat.db. Milestone 5
-(three-layer storage + delta-gated summaries) landed; `new_conversation` is now count-based
-(`text_count < summarize_floor`). Live-loop validation complete. **Next: stand up a VPS and run it live
-on real texts for a few weeks of tuning** (Mac mini ~3 weeks out).
+**Status:** full pipeline built, 250+ tests green. Milestone 6 (the v1 feature core) landed: the
+tag/classification law (system tags + the `reply_status` choice classification with query-time decay),
+the per-conversation `summary` one-liner + `quickscan` MCP tool, deterministic reply metadata,
+watch.md's 3-section split (Who am I / What to watch / What I care about) with who-am-I + current
+date injected into every prompt, `texts_today` derived live from the raw store at MCP read, and
+`scripts/run_local.sh` (the one-script local/Mac-mini deploy). The LLM interpreter is deferred to
+dogfooding (deterministic law parse stays; the TagSpec contract is interpreter-ready).
+**Next: run `scripts/run_local.sh` and dogfood on real texts** (VPS or Mac mini later — same script).
 
 ## Roadmap
 
@@ -63,6 +67,12 @@ copy `raw_messages.sqlite` + `state.json` over to keep history (or just re-backf
 public MCP host, or decommission it.
 
 ## Feature backlog (roadmap item 3)
+
+**M6 status:** every `[core]` + `[near]` item below is BUILT except the LLM **interpreter**
+(deliberately deferred to dogfooding — the deterministic law parse is the law; the
+`TagSpec(kind/choices/origin)` + `SYSTEM_LAW`/`full_law` contract is ready for it to slot in).
+Notes: reply-status decay is computed at QUERY time (like `effective_tags`), not a sweep job; the
+short summary is rewritten by EVERY agent that runs on a conversation (daily keeps it freshest).
 
 Priority: **[core]** = default behavior, build first · **[near]** = soon after · **[future]** = post-v1.
 
@@ -128,6 +138,5 @@ available with descriptions.
 
 ## Bugs / hardening
 
-- **`raw_store._connect` doesn't `mkdir -p` its parent** — a fresh `serve --raw-store <new path>` 500s on
-  the first `/ingest` (`sqlite3.connect` won't create a db in a missing dir). `state_io` and the collector
-  already mkdir; raw_store should too. Found during live-loop validation. Fix with a test.
+- ~~**`raw_store._connect` doesn't `mkdir -p` its parent**~~ — FIXED (with a test): `_connect` now
+  mkdirs the parent before `sqlite3.connect`.

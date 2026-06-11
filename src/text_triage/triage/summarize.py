@@ -30,9 +30,9 @@ from typing import Optional, Sequence, Union
 from text_triage.config import Config
 from text_triage.triage.engine import Engine
 from text_triage.triage.prompts import build_system, build_user
-from text_triage.state.schema import Conversation, State, validate_state
+from text_triage.state.schema import REPLY_STATUSES, Conversation, State, validate_state
 from text_triage.triage.skeleton import build_skeleton
-from text_triage.triage.tags import active_slugs, load_law
+from text_triage.triage.tags import active_slugs, load_law, load_watch
 
 __all__ = [
     "summarize_daily", "summarize_weekly", "summarize_monthly",
@@ -43,9 +43,11 @@ log = logging.getLogger(__name__)
 
 # Agent-authored fields carried forward from the previous record (facts come fresh from extract).
 # `summarized_through` (the per-conversation summary cursor) carries so a skipped conversation keeps
-# its cursor and its new messages accumulate until they cross the floor.
-_CARRY = ("identity", "tags", "daily", "weekly", "monthly", "history", "edited", "texts_today",
-          "summarized_through")
+# its cursor and its new messages accumulate until they cross the floor. `reply_status` is
+# deliberately NOT carried: the fresh deterministic gate is the base every run, and the LLM may
+# override it per call.
+_CARRY = ("identity", "summary", "tags", "daily", "weekly", "monthly", "history", "edited",
+          "texts_today", "summarized_through")
 
 
 # --------------------------------------------------------------------------- formatting
@@ -81,13 +83,16 @@ def _cap_raw(raw: list, caps, mode: str) -> list:
     return raw[-n:] if n and len(raw) > n else raw
 
 
-def build_daily_prompt(skel: dict, raw: list, *, prev: Optional[dict], law: dict, agents_dir=None):
+def build_daily_prompt(skel: dict, raw: list, *, prev: Optional[dict], law: dict, who_am_i: str = "",
+                       today: str = "", agents_dir=None):
     """(system, user) for the daily agent: shared global frame + daily role; per-conversation data."""
     prev = prev or {}
-    system = build_system("daily", law=_format_law(law), agents_dir=agents_dir)
+    system = build_system("daily", law=_format_law(law), who_am_i=who_am_i, today=today,
+                          agents_dir=agents_dir)
     user = build_user("daily", {
         "name": skel.get("name"), "kind": _kind(skel),
         "identity": prev.get("identity") or "(none yet)",
+        "summary": prev.get("summary") or "(none yet)",
         "monthly": prev.get("monthly") or "(none yet)",
         "weekly": _format_weekly(prev.get("weekly")),
         "daily": _format_dated(prev.get("daily")),
@@ -98,13 +103,16 @@ def build_daily_prompt(skel: dict, raw: list, *, prev: Optional[dict], law: dict
     return system, user
 
 
-def build_weekly_prompt(skel: dict, raw: list, *, prev: Optional[dict], law: dict, agents_dir=None):
+def build_weekly_prompt(skel: dict, raw: list, *, prev: Optional[dict], law: dict, who_am_i: str = "",
+                        today: str = "", agents_dir=None):
     """(system, user) for the weekly agent. The user payload omits daily notes (week rebuilt from raw)."""
     prev = prev or {}
-    system = build_system("weekly", law=_format_law(law), agents_dir=agents_dir)
+    system = build_system("weekly", law=_format_law(law), who_am_i=who_am_i, today=today,
+                          agents_dir=agents_dir)
     user = build_user("weekly", {
         "name": skel.get("name"), "kind": _kind(skel),
         "identity": prev.get("identity") or "(none yet)",
+        "summary": prev.get("summary") or "(none yet)",
         "monthly": prev.get("monthly") or "(none yet)",
         "history": _format_dated(prev.get("history")),
         "msg_count": len(raw),
@@ -113,13 +121,16 @@ def build_weekly_prompt(skel: dict, raw: list, *, prev: Optional[dict], law: dic
     return system, user
 
 
-def build_monthly_prompt(skel: dict, raw: list, *, prev: Optional[dict], law: dict, agents_dir=None):
+def build_monthly_prompt(skel: dict, raw: list, *, prev: Optional[dict], law: dict, who_am_i: str = "",
+                         today: str = "", agents_dir=None):
     """(system, user) for the monthly agent. The user payload omits weekly + daily notes."""
     prev = prev or {}
-    system = build_system("monthly", law=_format_law(law), agents_dir=agents_dir)
+    system = build_system("monthly", law=_format_law(law), who_am_i=who_am_i, today=today,
+                          agents_dir=agents_dir)
     user = build_user("monthly", {
         "name": skel.get("name"), "kind": _kind(skel),
         "identity": prev.get("identity") or "(none yet)",
+        "summary": prev.get("summary") or "(none yet)",
         "monthly": prev.get("monthly") or "(none yet)",
         "history": _format_dated(prev.get("history")),
         "msg_count": len(raw),
@@ -195,11 +206,16 @@ def _silent_over_30d(last_message_at: str, generated_at: str) -> bool:
 
 
 def _carry(skel: dict, prev: Optional[dict]) -> dict:
-    """A fresh record = deterministic facts from ``skel`` + the previous agent-authored fields."""
+    """A fresh record = deterministic facts from ``skel`` + the previous agent-authored fields.
+    The last-from-each-side timestamps fall back to the previous record when this window only
+    shows one side (a delta window has no memory of the other side's last message)."""
     rec = dict(skel)
     prev = prev or {}
     for f in _CARRY:
         if f in prev:
+            rec[f] = prev[f]
+    for f in ("last_from_me_at", "last_from_them_at"):
+        if not rec.get(f) and prev.get(f):
             rec[f] = prev[f]
     return rec
 
@@ -234,6 +250,16 @@ def _apply(mode: str, skel: dict, prev: Optional[dict], llm: dict, *, law_slugs:
         rec["tags"] = _merge_tags(rec.get("tags"), llm.get("tags"), law_slugs,
                                   mode="monthly", edited_has_tags=has_tags)
         rec["status"] = "dormant" if _silent_over_30d(rec["last_message_at"], generated_at) else "active"
+
+    # Every mode: the LLM may override the deterministic reply_status gate (an out-of-vocabulary or
+    # null value is sanitized to the gate, not retried) and rewrites the one-line summary (a blank
+    # keeps the previous one).
+    rs = llm.get("reply_status")
+    if rs in REPLY_STATUSES:
+        rec["reply_status"] = rs
+    summary = _clean(llm.get("summary"), "")
+    if summary:
+        rec["summary"] = summary
     return rec
 
 
@@ -242,11 +268,12 @@ def _validate_record(rec: dict, *, law_slugs: set) -> Conversation:
 
 
 async def _run_one(mode, skel, raw, prev, *, engine, config, law, law_slugs, generated_at, note_date,
-                   now_str, agents_dir) -> Conversation:
+                   now_str, who_am_i, agents_dir) -> Conversation:
     raw = _cap_raw(raw, config.engine.max_raw_messages, mode)
     builder = _BUILDERS[mode]
     model = getattr(config.engine.models, mode)
-    system, user = builder(skel, raw, prev=prev, law=law, agents_dir=agents_dir)
+    system, user = builder(skel, raw, prev=prev, law=law, who_am_i=who_am_i, today=generated_at,
+                           agents_dir=agents_dir)
     last_err: Optional[Exception] = None
     cur_user = user
     for _ in range(2):
@@ -269,12 +296,12 @@ async def _run_one(mode, skel, raw, prev, *, engine, config, law, law_slugs, gen
 async def _summarize(mode: str, export: dict, *, engine: Engine, config: Optional[Config] = None,
                      prev_state: Optional[Union[State, dict]] = None, law: Optional[dict] = None,
                      generated_at: Optional[str] = None, limit: Optional[int] = None,
-                     agents_dir=None) -> State:
+                     who_am_i: str = "", agents_dir=None) -> State:
     if config is None:
         config = Config()
     if law is None:
         law = load_law()
-    law_slugs = set(law)
+    law_slugs = active_slugs(law)   # freeform only: a choice slug can never be stored as a tag
 
     sk = build_skeleton(export, generated_at=generated_at).model_dump()
     generated_at = generated_at or sk["generated_at"]
@@ -310,7 +337,7 @@ async def _summarize(mode: str, export: dict, *, engine: Engine, config: Optiona
             rec = await _run_one(mode, skel, raw_by_id.get(cid, []), prev,
                                  engine=engine, config=config, law=law, law_slugs=law_slugs,
                                  generated_at=generated_at, note_date=note_date, now_str=now_str,
-                                 agents_dir=agents_dir)
+                                 who_am_i=who_am_i, agents_dir=agents_dir)
         rec = rec.model_dump()
         rec["summarized_through"] = max(rec.get("summarized_through") or 0, current_max_by_id.get(cid, 0))
         return rec, cid
@@ -371,7 +398,7 @@ def summarize_monthly(export, **kw) -> State:
 def build_contexts(mode: str, export: dict, *, config: Optional[Config] = None,
                    prev_state: Optional[Union[State, dict]] = None, law: Optional[dict] = None,
                    generated_at: Optional[str] = None, limit: Optional[int] = None,
-                   agents_dir=None) -> list:
+                   who_am_i: str = "", agents_dir=None) -> list:
     """Assemble the exact ``(system, user, model)`` each conversation WOULD be summarized with — no
     engine, no network. Backs ``--show-context`` so prompt tweaks can be eyeballed before spending
     tokens. Applies the same ``max_raw_messages`` cap and ``limit`` as a real run."""
@@ -391,7 +418,8 @@ def build_contexts(mode: str, export: dict, *, config: Optional[Config] = None,
             break
         cid = skel["chat_rowid"]
         raw = _cap_raw(raw_by_id.get(cid, []), config.engine.max_raw_messages, mode)
-        system, user = builder(skel, raw, prev=prev_by_id.get(cid), law=law, agents_dir=agents_dir)
+        system, user = builder(skel, raw, prev=prev_by_id.get(cid), law=law, who_am_i=who_am_i,
+                               today=sk["generated_at"], agents_dir=agents_dir)
         out.append({"chat_rowid": cid, "name": skel.get("name"), "model": model,
                     "system": system, "user": user, "est_tokens": (len(system) + len(user)) // 4})
     return out
@@ -433,6 +461,7 @@ def main(argv: Optional[Sequence[str]] = None, *, engine: Optional[Engine] = Non
 
     config = load_config(args.config)
     law = load_law(args.watch)
+    who_am_i = load_watch(args.watch).who_am_i
     prev = read_state(args.out, law=active_slugs(law)) if args.out and Path(args.out).exists() else None
 
     daily_since = args.since or (datetime.datetime.now() - datetime.timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
@@ -452,7 +481,8 @@ def main(argv: Optional[Sequence[str]] = None, *, engine: Optional[Engine] = Non
         export = extract(db_path=args.db, addressbook_dir=args.addressbook, since=daily_since, config=config)
 
     if args.show_context:                       # inspect the exact prompts; no LLM call, no spend
-        ctxs = build_contexts(args.mode, export, config=config, prev_state=prev, law=law, limit=args.limit)
+        ctxs = build_contexts(args.mode, export, config=config, prev_state=prev, law=law,
+                              limit=args.limit, who_am_i=who_am_i)
         for c in ctxs:
             print(f"=== chat_rowid {c['chat_rowid']}  {c['name']}  model={c['model']}  ~{c['est_tokens']} tokens ===")
             print("--- SYSTEM ---")
@@ -470,7 +500,8 @@ def main(argv: Optional[Sequence[str]] = None, *, engine: Optional[Engine] = Non
     if engine is None:
         engine = make_engine(config)
     fn = {"daily": summarize_daily, "weekly": summarize_weekly, "monthly": summarize_monthly}[args.mode]
-    state = fn(export, engine=engine, config=config, prev_state=prev, law=law, limit=args.limit)
+    state = fn(export, engine=engine, config=config, prev_state=prev, law=law, limit=args.limit,
+               who_am_i=who_am_i)
 
     if args.out:
         write_state(state, args.out, law=active_slugs(law))

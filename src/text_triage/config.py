@@ -45,6 +45,9 @@ class Messages(_CBase):
     # SUMMARIZE floor: daily skips the LLM call for a conversation with fewer than this many NEW
     # messages since its last summary (it rides in the raw layer until it accumulates). 0 = no gate.
     summarize_floor: int = Field(default=5, ge=0)
+    # REPLY DECAY: a waiting_reply older than this many days presents as standby at query time
+    # (nothing is owed once the thread goes quiet). Computed on read, never written. 0 = never decay.
+    reply_decay_days: int = Field(default=7, ge=0)
 
 
 # ── 2. models & billing ─ who runs each summary, and how you pay ─────────────
@@ -97,6 +100,9 @@ class Server(_CBase):
     # Caps the conversations per UNATTENDED summary run (the scheduler + /trigger spawns) — set low
     # (e.g. 20) for cheap dev testing, including the one-time bootstrap monthly. 0 = uncapped.
     bootstrap_limit: int = Field(default=0, ge=0)
+    # Live-raw cap: get_context derives each conversation's texts_today from the raw store at query
+    # time (messages newer than its summary cursor); keep only the newest N. 0 = uncapped.
+    texts_today_cap: int = Field(default=25, ge=0)
     schedule: Schedule = Field(default_factory=Schedule)
     live: Live = Field(default_factory=Live)
 

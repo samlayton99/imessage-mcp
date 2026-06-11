@@ -116,3 +116,17 @@ def test_committed_conditions_yaml_loads():
     c = load_config(REPO_ROOT / "conditions.yaml")
     assert isinstance(c, Config)
     assert c.server.schedule.timezone == "auto"
+
+
+# ----------------------------------------------------------- M6 knobs (reply decay / live-raw cap)
+def test_reply_decay_and_texts_today_cap_defaults():
+    c = Config()
+    assert c.messages.reply_decay_days == 7
+    assert c.server.texts_today_cap == 25
+
+
+def test_reply_decay_and_texts_today_cap_from_yaml(tmp_path):
+    c = load_config(write_yaml(tmp_path, "messages:\n  reply_decay_days: 0\n"
+                                         "server:\n  texts_today_cap: 5\n"))
+    assert c.messages.reply_decay_days == 0   # 0 = waiting_reply never decays
+    assert c.server.texts_today_cap == 5

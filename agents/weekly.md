@@ -4,6 +4,8 @@ Return exactly:
 {
   "identity": "<= 3 sentences on who this is to you, ONLY if the identity given is blank and the week clearly establishes it; otherwise null",
   "weekly_note": "ONE line capturing this week's arc for the conversation.",
+  "summary": "1-2 lines: the current snapshot of this conversation, rewritten fresh every run.",
+  "reply_status": "standby | waiting_reply | needs_response, judged by substance — or null to keep the current value",
   "tags": ["slug", ...]
 }
 The "tags" list is the COMPLETE set for this conversation (anything omitted is removed).

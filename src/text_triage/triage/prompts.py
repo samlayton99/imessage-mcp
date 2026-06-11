@@ -47,10 +47,16 @@ def render(name: str, mapping: dict, *, agents_dir: Optional[Union[str, Path]] =
     return string.Template(template).substitute(mapping)
 
 
-def build_system(mode: str, *, law: str, agents_dir: Optional[Union[str, Path]] = None) -> str:
-    """The system prompt: the shared global frame (with the tag ``law`` filled in) + this agent's role.
-    The global half is identical across all agents in a run (so it's cacheable + can't drift)."""
-    glob = render("_global", {"law": law}, agents_dir=agents_dir)
+def build_system(mode: str, *, law: str, who_am_i: str = "", today: str = "",
+                 agents_dir: Optional[Union[str, Path]] = None) -> str:
+    """The system prompt: the shared global frame (with the tag ``law``, the current ``today``
+    datetime, and the owner's ``who_am_i`` self-description filled in) + this agent's role. The
+    global half is identical across all agents in a run (so it's cacheable + can't drift)."""
+    glob = render("_global", {
+        "law": law,
+        "today": today or "(not provided)",
+        "who_am_i": who_am_i or "(not provided)",
+    }, agents_dir=agents_dir)
     role = render(mode, {}, agents_dir=agents_dir)
     return f"{glob.rstrip()}\n\n{role.lstrip()}"
 

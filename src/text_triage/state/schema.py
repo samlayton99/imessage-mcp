@@ -30,6 +30,7 @@ from pydantic import (
 )
 
 __all__ = [
+    "REPLY_STATUSES",
     "Watermark",
     "Unresponded",
     "DatedNote",
@@ -41,6 +42,12 @@ __all__ = [
     "is_valid_state",
     "ValidationError",
 ]
+
+
+# The reply-state vocabulary — the single source for skeleton, summarize, tags.SYSTEM_LAW and the
+# server. standby = reasonable stopping point; waiting_reply = last substantive reply is mine;
+# needs_response = last substantive reply is theirs.
+REPLY_STATUSES = ("standby", "waiting_reply", "needs_response")
 
 
 class _Base(BaseModel):
@@ -105,7 +112,12 @@ class Conversation(_Base):
     last_from: Literal["me", "them"]
     last_message_at: str
     last_updated: Optional[str] = None
-    needs_reply: bool = False
+    # Always-present reply state: the deterministic gate seeds it; the LLM may refine it for
+    # established conversations; waiting_reply decays to standby at QUERY time (never written back).
+    reply_status: Literal["standby", "waiting_reply", "needs_response"] = "standby"
+    # When each side last spoke (deterministic, from the raw messages); None until observed.
+    last_from_me_at: Optional[str] = None
+    last_from_them_at: Optional[str] = None
     # The max message_rowid this conversation's last summary saw; the daily delta gate measures
     # "new since last summary" against it. 0 = never summarized.
     summarized_through: int = 0
@@ -116,6 +128,8 @@ class Conversation(_Base):
     # --- live raw layer (code-owned; watcher pushes, the daily agent reads then clears) ---
     texts_today: list[TodayMessage] = []
     # --- agent-authored (blank in a skeleton record) ---
+    # 1-2 line current snapshot, rewritten by every agent that runs on the conversation.
+    summary: Optional[str] = None
     identity: Optional[str] = None
     tags: list[str] = []
     daily: list[DatedNote] = []
@@ -123,6 +137,18 @@ class Conversation(_Base):
     monthly: Optional[str] = None
     history: list[DatedNote] = []
     edited: dict[str, str] = {}
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_needs_reply(cls, data):
+        """Pre-M6 state.json files carry ``needs_reply: bool`` (extra=forbid would reject them).
+        Migrate on read; the next atomic write persists the new shape."""
+        if isinstance(data, dict) and "needs_reply" in data:
+            data = dict(data)
+            legacy = data.pop("needs_reply")
+            if "reply_status" not in data:
+                data["reply_status"] = "needs_response" if legacy else "standby"
+        return data
 
     @field_validator("identity")
     @classmethod

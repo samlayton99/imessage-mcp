@@ -19,7 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Union
 
-__all__ = ["TagSpec", "load_law", "active_slugs", "effective_tags", "discover_watch_path"]
+__all__ = ["TagSpec", "WatchDoc", "SYSTEM_LAW", "load_law", "load_watch", "full_law",
+           "active_slugs", "effective_tags", "discover_watch_path"]
 
 # A slug is lowercase alphanumerics joined by single hyphens (e.g. ``needs-scheduling``).
 _SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -38,6 +39,31 @@ class TagSpec:
     description: str
     lifetime: str               # "sticky" | "ttl"
     ttl_days: Optional[int]     # set iff lifetime == "ttl"
+    # kind="choice" is a pick-one classification (choices = the fixed vocabulary); its value is a
+    # typed Conversation field, never a slug stored in ``tags``. origin="system" entries are
+    # hard-coded here — the future LLM interpreter may curate user tags but cannot touch them.
+    kind: str = "freeform"      # "freeform" | "choice"
+    choices: Optional[list[str]] = None
+    origin: str = "user"        # "user" | "system"
+
+
+# The hard-coded system law: tags/classifications the interpreter cannot change or drop, unioned
+# with the watch.md user law by :func:`full_law`. ``reply_status``'s value lives in the typed
+# ``Conversation.reply_status`` field (see schema.REPLY_STATUSES — kept in sync by a test).
+SYSTEM_LAW: dict[str, TagSpec] = {
+    "reply_status": TagSpec(
+        slug="reply_status",
+        description=("Always-present reply state. standby: the conversation is at a reasonable "
+                     "stopping point. waiting_reply: the last substantive reply is the account "
+                     "owner's (decays to standby after a configurable quiet period). "
+                     "needs_response: the last substantive reply is the other person's."),
+        lifetime="sticky",
+        ttl_days=None,
+        kind="choice",
+        choices=["standby", "waiting_reply", "needs_response"],
+        origin="system",
+    ),
+}
 
 
 def _infer_lifetime(description: str) -> tuple[str, Optional[int]]:
@@ -68,14 +94,48 @@ def discover_watch_path(explicit: Optional[Union[str, Path]]) -> Optional[Path]:
     return None
 
 
-def load_law(path: Optional[Union[str, Path]] = None) -> dict[str, TagSpec]:
-    """Parse watch.md into ``{slug: TagSpec}``. A missing file yields an empty law; comment (``#``),
-    blank, and malformed lines are skipped. First definition of a slug wins."""
+@dataclass(frozen=True)
+class WatchDoc:
+    """watch.md split into its three sections (each "" when absent). ``who_am_i`` feeds the shared
+    prompt frame; ``what_to_watch`` holds the tag-law lines; ``what_i_care_about`` is reserved for
+    the future interpreter."""
+    who_am_i: str = ""
+    what_to_watch: str = ""
+    what_i_care_about: str = ""
+
+
+_SECTION_FIELDS = {"who am i": "who_am_i", "what to watch": "what_to_watch",
+                   "what i care about": "what_i_care_about"}
+
+
+def load_watch(path: Optional[Union[str, Path]] = None) -> WatchDoc:
+    """Read watch.md into a :class:`WatchDoc`. Sections are ``## <title>`` headers (case-insensitive,
+    matching the three known titles); a sectionless file is treated as all "What to watch" — the
+    pre-section format keeps working unchanged. Missing file → all empty. Never errors."""
     p = discover_watch_path(path)
     if p is None or not Path(p).exists():
-        return {}
-    law: dict[str, TagSpec] = {}
+        return WatchDoc()
+    parts: dict[str, list[str]] = {f: [] for f in _SECTION_FIELDS.values()}
+    current: Optional[str] = None
+    saw_section = False
     for line in Path(p).read_text(encoding="utf-8").splitlines():
+        title = line.strip().lstrip("#").strip().lower() if line.lstrip().startswith("##") else None
+        if title in _SECTION_FIELDS:
+            current = _SECTION_FIELDS[title]
+            saw_section = True
+            continue
+        if current is not None:
+            parts[current].append(line)
+    if not saw_section:
+        return WatchDoc(what_to_watch=Path(p).read_text(encoding="utf-8"))
+    return WatchDoc(**{f: "\n".join(lines).strip() for f, lines in parts.items()})
+
+
+def _parse_law_lines(text: str) -> dict[str, TagSpec]:
+    """Each ``- <slug>: <description>`` line becomes a TagSpec; comment (``#``), blank, and malformed
+    lines are skipped. First definition of a slug wins."""
+    law: dict[str, TagSpec] = {}
+    for line in text.splitlines():
         if line.lstrip().startswith("#"):
             continue
         m = _LINE_RE.match(line)
@@ -88,9 +148,23 @@ def load_law(path: Optional[Union[str, Path]] = None) -> dict[str, TagSpec]:
     return law
 
 
+def load_law(path: Optional[Union[str, Path]] = None) -> dict[str, TagSpec]:
+    """Parse watch.md's "What to watch" section (or the whole file when sectionless) into
+    ``{slug: TagSpec}``. A missing file yields an empty law."""
+    return _parse_law_lines(load_watch(path).what_to_watch)
+
+
+def full_law(user_law: dict[str, TagSpec]) -> dict[str, TagSpec]:
+    """The law the MCP surface sees: the system law unioned with the watch.md user law. System
+    entries win on a slug collision — user prose can never shadow or redefine them."""
+    return {**user_law, **SYSTEM_LAW}
+
+
 def active_slugs(law: dict[str, TagSpec]) -> set[str]:
-    """The set of active tag slugs a tag assignment must be drawn from."""
-    return set(law)
+    """The freeform slugs a ``tags`` assignment must be drawn from. Choice classifications are
+    excluded: their values are typed Conversation fields, so a model emitting one as a tag slug
+    is dropped/rejected instead of stored."""
+    return {s for s, spec in law.items() if spec.kind == "freeform"}
 
 
 def _field(conv, attr: str):

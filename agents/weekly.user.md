@@ -1,5 +1,6 @@
 Conversation: ${name} (${kind})
 Identity on file: ${identity}
+Current one-liner: ${summary}
 Monthly summary: ${monthly}
 
 History (dated long-term archive):

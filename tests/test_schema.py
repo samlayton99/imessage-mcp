@@ -17,7 +17,7 @@ def valid_conv(**overrides):
         "status": "active",
         "last_from": "them",
         "last_message_at": "2026-05-31 14:02",
-        "needs_reply": False,
+        "reply_status": "standby",
     }
     base.update(overrides)
     return base
@@ -128,6 +128,56 @@ def test_tags_outside_law_invalid():
 
 def test_empty_tags_always_valid_even_without_law():
     validate_state(valid_state())  # no law passed, tags default []
+
+
+# ----------------------------------------------------------------- reply_status
+def test_reply_status_defaults_to_standby():
+    conv = valid_conv()
+    conv.pop("reply_status")
+    assert Conversation.model_validate(conv).reply_status == "standby"
+
+
+def test_reply_status_accepts_the_three_states():
+    for v in ("standby", "waiting_reply", "needs_response"):
+        assert Conversation.model_validate(valid_conv(reply_status=v)).reply_status == v
+
+
+def test_reply_status_rejects_out_of_vocabulary():
+    with pytest.raises(ValidationError):
+        Conversation.model_validate(valid_conv(reply_status="shouting"))
+
+
+def test_legacy_needs_reply_true_migrates_to_needs_response():
+    conv = valid_conv(needs_reply=True)
+    conv.pop("reply_status")
+    c = Conversation.model_validate(conv)
+    assert c.reply_status == "needs_response"
+    assert "needs_reply" not in c.model_dump()
+
+
+def test_legacy_needs_reply_false_migrates_to_standby():
+    conv = valid_conv(needs_reply=False)
+    conv.pop("reply_status")
+    assert Conversation.model_validate(conv).reply_status == "standby"
+
+
+def test_legacy_needs_reply_does_not_clobber_explicit_reply_status():
+    # A half-migrated record (both fields) keeps the new field; the legacy one is just dropped.
+    c = Conversation.model_validate(valid_conv(needs_reply=True, reply_status="standby"))
+    assert c.reply_status == "standby"
+
+
+# ----------------------------------------------------- summary + reply metadata
+def test_summary_and_reply_metadata_default_to_none():
+    c = Conversation.model_validate(valid_conv())
+    assert c.summary is None and c.last_from_me_at is None and c.last_from_them_at is None
+
+
+def test_summary_and_reply_metadata_round_trip():
+    c = Conversation.model_validate(valid_conv(
+        summary="Planning his July move; owes you a date for the 28th.",
+        last_from_me_at="2026-05-30 09:00", last_from_them_at="2026-05-31 14:02"))
+    assert c.summary.startswith("Planning") and c.last_from_me_at == "2026-05-30 09:00"
 
 
 # ------------------------------------------------------------------ extra forbidden

@@ -1,5 +1,6 @@
 Conversation: ${name} (${kind})
 Identity on file: ${identity}
+Current one-liner: ${summary}
 Monthly summary: ${monthly}
 
 Recent weekly notes:

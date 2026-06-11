@@ -61,6 +61,13 @@ def sample_export():
     }
 
 
+def test_ingest_creates_missing_parent_dirs(tmp_path):
+    """A fresh server's first /ingest must not 500 because ~/.text-triage/ doesn't exist yet."""
+    db = tmp_path / "fresh" / "sub" / "raw.sqlite"
+    assert raw_store.ingest(sample_export(), path=db) == 7
+    assert db.exists()
+
+
 def test_ingest_dedups_on_chat_and_message_rowid(tmp_path):
     db = tmp_path / "raw.sqlite"
     n1 = raw_store.ingest(sample_export(), path=db)
@@ -94,6 +101,14 @@ def test_history_since_filters_and_orders(tmp_path):
     recent = raw_store.history(10, since=_dtstr(3), path=db)  # within the last 3 days
     assert [m["message_rowid"] for m in recent] == [3, 4]     # 5d-ago and 40d-ago excluded
     assert recent[0]["text"] == "yeah what's up"
+
+
+def test_history_after_rowid_returns_only_newer_messages(tmp_path):
+    """The derived-texts_today read: messages strictly after a conversation's summary cursor."""
+    db = tmp_path / "raw.sqlite"
+    raw_store.ingest(sample_export(), path=db)                # conv10: rowids 1-4
+    assert [m["message_rowid"] for m in raw_store.history(10, after_rowid=2, path=db)] == [3, 4]
+    assert raw_store.history(10, after_rowid=4, path=db) == []
 
 
 def test_export_window_is_consumable_by_skeleton(tmp_path):
@@ -175,6 +190,14 @@ def test_prune_zero_keeps_forever(tmp_path):
     raw_store.ingest(sample_export(), path=db)
     assert raw_store.prune(raw_store_days=0, now=NOW, path=db) == 0
     assert len(raw_store.history(10, path=db)) == 4
+
+
+def test_counts_returns_per_conversation_totals_excluding_deleted(tmp_path):
+    db = tmp_path / "raw.sqlite"
+    raw_store.ingest(sample_export(), path=db)                       # 4 + 1 + 2 messages
+    assert raw_store.counts(path=db) == {10: 4, 20: 1, 30: 2}
+    raw_store.ingest({"conversations": [], "deleted": [{"chat_rowid": 10, "message_rowid": 2}]}, path=db)
+    assert raw_store.counts(path=db)[10] == 3                        # deleted rows excluded
 
 
 # --------------------------------------------------------------------------- deleted flag

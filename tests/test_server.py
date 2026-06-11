@@ -24,7 +24,7 @@ def _conv(rowid, name, **over):
     base = {
         "chat_rowid": rowid, "name": name, "is_group": False, "handle": f"+1555000{rowid:04d}",
         "members": None, "status": "active", "last_from": "them",
-        "last_message_at": "2026-05-30 10:00:00", "needs_reply": True,
+        "last_message_at": "2026-05-30 10:00:00", "reply_status": "needs_response",
         "identity": None, "tags": [], "daily": [], "weekly": [], "monthly": None,
         "history": [], "texts_today": [], "edited": {},
     }
@@ -34,17 +34,18 @@ def _conv(rowid, name, **over):
 
 def _state(tmp_path):
     """A 3-conversation state: an active 1:1 owed a reply (recent ttl tag), an active family 1:1
-    (no reply needed), and a dormant 1:1 whose ttl tag has aged out."""
+    awaiting Mom's reply since 05-15 (17d before AS_OF), and a dormant 1:1 whose ttl tag has aged out."""
     data = {
         "generated_at": "2026-06-01 12:00:00",
         "watermark": {"max_date_raw": 1, "max_message_rowid": 9},
         "unresponded": [],
         "conversations": [
-            _conv(10, "Avery", tags=["needs-scheduling"], needs_reply=True, identity="Climbing friend.",
+            _conv(10, "Avery", tags=["needs-scheduling"], reply_status="needs_response",
+                  identity="Climbing friend.",
                   daily=[{"date": "2026-05-30", "text": "Asked about Saturday."}],
                   texts_today=[{"message_rowid": 9, "datetime": "2026-06-01 11:00:00",
                                 "sender": "Avery", "text": "still on?"}]),
-            _conv(20, "Mom", tags=["family"], needs_reply=False, last_from="me",
+            _conv(20, "Mom", tags=["family"], reply_status="waiting_reply", last_from="me",
                   last_message_at="2026-05-15 09:00:00"),
             _conv(30, "Old Coworker", tags=["needs-scheduling"], status="dormant",
                   last_message_at="2026-04-01 10:00:00"),  # 60d ago -> ttl(7) expired
@@ -56,13 +57,18 @@ def _state(tmp_path):
 
 
 # ------------------------------------------------------------------- list_tags
-def test_list_tags_returns_the_law(tmp_path):
+def test_list_tags_returns_the_full_law_with_system_tags(tmp_path):
     out = app.list_tags_impl(law_path=_law(tmp_path))
     by_slug = {t["slug"]: t for t in out}
-    assert set(by_slug) == {"family", "needs-scheduling"}
+    assert set(by_slug) == {"reply_status", "family", "needs-scheduling"}
     assert by_slug["family"]["lifetime"] == "sticky"
+    assert by_slug["family"]["kind"] == "freeform"
+    assert by_slug["family"]["origin"] == "user"
     assert by_slug["needs-scheduling"]["lifetime"] == "ttl"
     assert by_slug["needs-scheduling"]["ttl_days"] == 7
+    assert by_slug["reply_status"]["kind"] == "choice"
+    assert by_slug["reply_status"]["choices"] == ["standby", "waiting_reply", "needs_response"]
+    assert by_slug["reply_status"]["origin"] == "system"
 
 
 # ------------------------------------------------------------------ get_context
@@ -85,9 +91,78 @@ def test_get_context_tag_filter_uses_effective_tags(tmp_path):
     assert out["conversations"][0]["tags"] == ["needs-scheduling"]   # effective, not raw
 
 
-def test_get_context_needs_reply_filter(tmp_path):
-    out = app.get_context_impl(_state(tmp_path), law_path=_law(tmp_path), needs_reply=True, as_of=AS_OF)
+def test_get_context_reply_status_filter(tmp_path):
+    out = app.get_context_impl(_state(tmp_path), law_path=_law(tmp_path),
+                               reply_status="needs_response", as_of=AS_OF)
     assert {c["chat_rowid"] for c in out["conversations"]} == {10}
+
+
+# -------------------------------------------------------- reply_status query-time decay
+def test_get_context_decays_stale_waiting_reply_to_standby(tmp_path):
+    """Mom's waiting_reply is 17 days old; with a 7-day decay it presents as standby — in the
+    returned value AND for filtering (never written back)."""
+    out = app.get_context_impl(_state(tmp_path), law_path=_law(tmp_path),
+                               reply_decay_days=7, as_of=AS_OF)
+    mom = next(c for c in out["conversations"] if c["chat_rowid"] == 20)
+    assert mom["reply_status"] == "standby"
+    out = app.get_context_impl(_state(tmp_path), law_path=_law(tmp_path),
+                               reply_status="waiting_reply", reply_decay_days=7, as_of=AS_OF)
+    assert out["conversations"] == []                      # decayed away from waiting_reply
+    out = app.get_context_impl(_state(tmp_path), law_path=_law(tmp_path),
+                               reply_status="standby", reply_decay_days=7, as_of=AS_OF)
+    assert {c["chat_rowid"] for c in out["conversations"]} == {20}
+
+
+def test_get_context_fresh_waiting_reply_is_kept(tmp_path):
+    out = app.get_context_impl(_state(tmp_path), law_path=_law(tmp_path),
+                               reply_decay_days=30, as_of=AS_OF)   # 17d < 30d window
+    mom = next(c for c in out["conversations"] if c["chat_rowid"] == 20)
+    assert mom["reply_status"] == "waiting_reply"
+
+
+# ------------------------------------------------- texts_today derived from the raw store
+def _seed_raw(tmp_path):
+    raw_path = tmp_path / "raw.sqlite"
+    raw_store.ingest({"conversations": [
+        {"chat_rowid": 10, "name": "Avery", "handle": "+15550000010", "is_named": True,
+         "is_groupchat": False, "members": None, "contact_details": None, "conversation": [
+             {"message_rowid": 7, "date": 7, "datetime": "2026-05-30 10:00:00", "sender": "Avery", "text": "summarized already"},
+             {"message_rowid": 8, "date": 8, "datetime": "2026-06-01 10:00:00", "sender": "me", "text": "fresh from me"},
+             {"message_rowid": 9, "date": 9, "datetime": "2026-06-01 11:00:00", "sender": "Avery", "text": "fresh from them"}]}]},
+        path=raw_path)
+    return raw_path
+
+
+def test_get_context_derives_texts_today_from_raw_store(tmp_path):
+    """With a raw_path the live raw layer is computed at query time: every stored message newer than
+    the conversation's summarized_through cursor — the stored (always-empty in production) field is
+    ignored."""
+    raw_path = _seed_raw(tmp_path)
+    state_path = tmp_path / "state.json"
+    data = state_io.read_state(_state(tmp_path)).model_dump()
+    for c in data["conversations"]:
+        if c["chat_rowid"] == 10:
+            c["summarized_through"], c["texts_today"] = 7, []   # cursor at 7; stored field empty
+    state_io.write_state(data, state_path)
+    out = app.get_context_impl(state_path, law_path=_law(tmp_path), raw_path=raw_path, as_of=AS_OF)
+    avery = next(c for c in out["conversations"] if c["chat_rowid"] == 10)
+    assert [m["message_rowid"] for m in avery["texts_today"]] == [8, 9]   # newer than the cursor
+
+
+def test_get_context_texts_today_respects_cap_and_deleted(tmp_path):
+    raw_path = _seed_raw(tmp_path)
+    raw_store.ingest({"conversations": [],
+                      "deleted": [{"chat_rowid": 10, "message_rowid": 8}]}, path=raw_path)
+    out = app.get_context_impl(_state(tmp_path), law_path=_law(tmp_path), raw_path=raw_path,
+                               texts_today_cap=1, as_of=AS_OF)
+    avery = next(c for c in out["conversations"] if c["chat_rowid"] == 10)
+    assert [m["message_rowid"] for m in avery["texts_today"]] == [9]   # 8 deleted; newest-1 kept
+
+
+def test_get_context_without_raw_path_keeps_stored_texts_today(tmp_path):
+    out = app.get_context_impl(_state(tmp_path), law_path=_law(tmp_path), as_of=AS_OF)
+    avery = next(c for c in out["conversations"] if c["chat_rowid"] == 10)
+    assert avery["texts_today"][0]["text"] == "still on?"              # impl-level legacy behavior
 
 
 def test_get_context_carries_notes_and_texts_today(tmp_path):
@@ -147,6 +222,28 @@ def test_get_raw_history_reads_the_store(tmp_path):
     assert hist[0]["text"] == "yo"
 
 
+# ----------------------------------------------------------------------- quickscan
+def test_quickscan_returns_the_triage_list(tmp_path):
+    raw_path = _seed_raw(tmp_path)                                   # conv 10: 3 stored messages
+    rows = app.quickscan_impl(_state(tmp_path), raw_path=raw_path, as_of=AS_OF)
+    by_id = {r["chat_rowid"]: r for r in rows}
+    assert set(by_id) == {10, 20}                                    # active only by default
+    avery = by_id[10]
+    assert avery["name"] == "Avery" and avery["is_group"] is False
+    assert avery["message_count"] == 3
+    assert avery["last_message_at"] == "2026-05-30 10:00:00"
+    assert avery["reply_status"] == "needs_response"
+    assert "summary" in avery
+    assert by_id[20]["message_count"] == 0                           # absent from the raw store
+
+
+def test_quickscan_decays_and_includes_dormant_on_request(tmp_path):
+    rows = app.quickscan_impl(_state(tmp_path), reply_decay_days=7, include_dormant=True, as_of=AS_OF)
+    by_id = {r["chat_rowid"]: r for r in rows}
+    assert set(by_id) == {10, 20, 30}
+    assert by_id[20]["reply_status"] == "standby"                    # 17d-old waiting_reply decayed
+
+
 # ----------------------------------------------------------- update_conversation
 def test_update_conversation_stamps_edited_and_replaces_tags(tmp_path):
     state_path = _state(tmp_path)
@@ -169,7 +266,7 @@ def test_update_conversation_rejects_out_of_law_tags(tmp_path):
 
 def test_update_conversation_rejects_protected_fields(tmp_path):
     state_path = _state(tmp_path)
-    for protected in ("daily", "needs_reply", "texts_today", "chat_rowid"):
+    for protected in ("daily", "reply_status", "texts_today", "chat_rowid"):
         with pytest.raises(ValueError):
             app.update_conversation_impl(state_path, conversation=10, law_path=_law(tmp_path),
                                          fields={protected: "x"})
@@ -207,7 +304,7 @@ def test_build_app_registers_the_tools_and_routes(tmp_path):
     mcp = app.build_app(Config(), state_path=tmp_path / "s.json", raw_path=tmp_path / "r.sqlite",
                         law_path=tmp_path / "w.md", ingest_token="t", mcp_key="k")
     names = {t.name for t in asyncio.run(mcp.list_tools())}
-    assert names == {"list_tags", "get_context", "get_raw_history", "update_conversation"}
+    assert names == {"list_tags", "get_context", "get_raw_history", "update_conversation", "quickscan"}
     routes = {r.path for r in mcp._additional_http_routes}
     assert routes == {"/ingest", "/trigger", "/health"}
 

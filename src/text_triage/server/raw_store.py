@@ -27,7 +27,7 @@ from text_triage.collect.extract import (
 )
 from text_triage.config import Config
 
-__all__ = ["ingest", "history", "export", "deltas", "prune"]
+__all__ = ["ingest", "history", "counts", "export", "deltas", "prune"]
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversations (
@@ -54,6 +54,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_chat_date ON messages (chat_rowid, date)
 
 
 def _connect(path: Union[str, Path]) -> sqlite3.Connection:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)  # sqlite won't create a db in a missing dir
     con = sqlite3.connect(str(path))
     con.executescript(_SCHEMA)
     if "deleted" not in {r[1] for r in con.execute("PRAGMA table_info(messages)")}:  # migrate older stores
@@ -113,11 +114,13 @@ def ingest(export: dict, *, path: Union[str, Path]) -> int:
 
 
 # -------------------------------------------------------------------------- history
-def history(chat_rowid: int, *, since: Optional[str] = None, limit: Optional[int] = None,
-            include_deleted: bool = False, path: Union[str, Path]) -> list[dict]:
+def history(chat_rowid: int, *, since: Optional[str] = None, after_rowid: Optional[int] = None,
+            limit: Optional[int] = None, include_deleted: bool = False,
+            path: Union[str, Path]) -> list[dict]:
     """One conversation's stored messages, oldest first. ``since`` (an ISO ``YYYY-MM-DD HH:MM:SS``
-    string) keeps only messages at/after that moment; ``limit`` caps the count. Deleted/unsent messages
-    are hidden unless ``include_deleted`` is set."""
+    string) keeps only messages at/after that moment; ``after_rowid`` keeps only messages strictly
+    newer than that rowid (the derived-texts_today read against a summary cursor); ``limit`` caps the
+    count. Deleted/unsent messages are hidden unless ``include_deleted`` is set."""
     con = _connect(path)
     cur = con.cursor()
     q = "SELECT message_rowid, datetime, sender, text FROM messages WHERE chat_rowid=?"
@@ -127,12 +130,24 @@ def history(chat_rowid: int, *, since: Optional[str] = None, limit: Optional[int
     if since is not None:
         q += " AND datetime >= ?"
         params.append(since)
+    if after_rowid is not None:
+        q += " AND message_rowid > ?"
+        params.append(after_rowid)
     q += " ORDER BY date ASC, message_rowid ASC"
     if limit:
         q += f" LIMIT {int(limit)}"
     rows = cur.execute(q, params).fetchall()
     con.close()
     return [{"message_rowid": r[0], "datetime": r[1], "sender": r[2], "text": r[3]} for r in rows]
+
+
+def counts(*, path: Union[str, Path]) -> dict[int, int]:
+    """Total stored (non-deleted) message count per conversation — the quickscan read."""
+    con = _connect(path)
+    rows = con.execute(
+        "SELECT chat_rowid, COUNT(*) FROM messages WHERE deleted=0 GROUP BY chat_rowid").fetchall()
+    con.close()
+    return {r[0]: r[1] for r in rows}
 
 
 # --------------------------------------------------------------------------- export

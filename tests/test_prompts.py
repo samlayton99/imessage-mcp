@@ -53,9 +53,22 @@ def test_build_system_renders_all_three_committed_roles():
         assert "memory-keeper" in build_system(mode, law="  - family (sticky): kin")
 
 
+def test_build_system_injects_today_and_who_am_i():
+    sysp = build_system("daily", law="  - x (sticky): y",
+                        who_am_i="Sam, a grad student in Boston.", today="2026-06-10 09:00")
+    assert "2026-06-10 09:00" in sysp
+    assert "grad student in Boston" in sysp
+
+
+def test_build_system_defaults_read_sensibly_when_omitted():
+    sysp = build_system("daily", law="  - x (sticky): y")   # the pre-M6 call shape still works
+    assert "${today}" not in sysp and "${who_am_i}" not in sysp
+    assert "Today is" in sysp                               # the frame line survives with a fallback
+
+
 # ---- build_user: per-conversation data --------------------------------------
 def test_build_user_daily_has_name_count_and_messages():
-    user = build_user("daily", {"name": "Avery", "kind": "1:1", "identity": "i", "monthly": "m",
-                                "weekly": "(none)", "daily": "(none)", "history": "(none)",
-                                "msg_count": 1, "messages": "  [t] Avery: hi"})
+    user = build_user("daily", {"name": "Avery", "kind": "1:1", "identity": "i", "summary": "s",
+                                "monthly": "m", "weekly": "(none)", "daily": "(none)",
+                                "history": "(none)", "msg_count": 1, "messages": "  [t] Avery: hi"})
     assert "Avery (1:1)" in user and "hi" in user and "1 message" in user

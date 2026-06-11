@@ -20,10 +20,11 @@ from text_triage.config import Config, load_config
 from text_triage.server import raw_store
 from text_triage.state import state_io
 from text_triage.triage import tags as tagmod
+from text_triage.triage.skeleton import decayed_reply_status
 
 __all__ = ["build_app", "run_server", "authorize",
            "list_tags_impl", "get_context_impl", "get_raw_history_impl",
-           "update_conversation_impl", "ingest_impl"]
+           "update_conversation_impl", "quickscan_impl", "ingest_impl"]
 
 # Fields a human / the write-agent may edit via MCP. Facts, daily, and the live raw layer are off-limits.
 _WRITABLE = {"identity", "monthly", "weekly", "history", "tags"}
@@ -42,20 +43,29 @@ def _resolve_since(since: Optional[str], default_lookback_days: Optional[int],
 
 # --------------------------------------------------------------- tool logic (pure)
 def list_tags_impl(*, law_path: Optional[Union[str, Path]] = None) -> list[dict]:
-    """The active tag law — the filter vocabulary MCP clients may use."""
-    law = tagmod.load_law(law_path)
+    """The active tag law — the filter vocabulary MCP clients may use. The union of the hard-coded
+    system law (choice classifications like ``reply_status``) and the watch.md user law."""
+    law = tagmod.full_law(tagmod.load_law(law_path))
     return [{"slug": s.slug, "description": s.description, "lifetime": s.lifetime,
-             "ttl_days": s.ttl_days} for s in law.values()]
+             "ttl_days": s.ttl_days, "kind": s.kind, "choices": s.choices, "origin": s.origin}
+            for s in law.values()]
 
 
 def get_context_impl(state_path: Union[str, Path], *, law_path: Optional[Union[str, Path]] = None,
+                     raw_path: Optional[Union[str, Path]] = None,
                      tags: Optional[list[str]] = None, since: Optional[str] = None,
-                     needs_reply: Optional[bool] = None, include_dormant: bool = False,
-                     default_lookback_days: Optional[int] = None, as_of=None) -> dict:
+                     reply_status: Optional[str] = None, include_dormant: bool = False,
+                     default_lookback_days: Optional[int] = None,
+                     reply_decay_days: Optional[int] = None,
+                     texts_today_cap: Optional[int] = None, as_of=None) -> dict:
     """The layered memory for matching conversations (notes + tags + ``texts_today``). Tag filtering
     uses :func:`effective_tags` (currently-relevant), not the raw stored slugs; defaults to ``active``
-    only. ``since`` keeps conversations whose ``last_message_at`` is at/after that moment; with no
-    ``since`` the ``default_lookback_days`` window applies (the MCP default)."""
+    only. ``reply_status`` filters on (and every record surfaces) the query-time DECAYED status — a
+    ``waiting_reply`` older than ``reply_decay_days`` presents as ``standby``, never written back.
+    With a ``raw_path``, each match's ``texts_today`` is derived live from the raw store (messages
+    newer than its ``summarized_through`` cursor, newest ``texts_today_cap`` kept); without one the
+    stored field passes through. ``since`` keeps conversations whose ``last_message_at`` is at/after
+    that moment; with no ``since`` the ``default_lookback_days`` window applies (the MCP default)."""
     since = _resolve_since(since, default_lookback_days, as_of)
     state = state_io.read_state(state_path)
     law = tagmod.load_law(law_path)
@@ -64,7 +74,9 @@ def get_context_impl(state_path: Union[str, Path], *, law_path: Optional[Union[s
     for c in state.model_dump()["conversations"]:
         if c["status"] != "active" and not include_dormant:
             continue
-        if needs_reply is not None and c["needs_reply"] != needs_reply:
+        eff_rs = decayed_reply_status(c["reply_status"], c.get("last_message_at"),
+                                      decay_days=reply_decay_days or 0, as_of=as_of)
+        if reply_status is not None and eff_rs != reply_status:
             continue
         if since is not None and (c.get("last_message_at") or "") < since:
             continue
@@ -72,8 +84,38 @@ def get_context_impl(state_path: Union[str, Path], *, law_path: Optional[Union[s
         if want is not None and not (want & set(eff)):
             continue
         c["tags"] = eff                      # surface the effective tags, not the raw stored slugs
+        c["reply_status"] = eff_rs           # surface the decayed status, not the raw stored one
+        if raw_path is not None:             # the live raw layer, derived at query time
+            live = raw_store.history(c["chat_rowid"], after_rowid=c.get("summarized_through") or 0,
+                                     path=raw_path)
+            c["texts_today"] = live[-texts_today_cap:] if texts_today_cap else live
         out.append(c)
     return {"generated_at": state.generated_at, "conversations": out}
+
+
+def quickscan_impl(state_path: Union[str, Path], raw_path: Optional[Union[str, Path]] = None, *,
+                   reply_decay_days: Optional[int] = None, include_dormant: bool = False,
+                   as_of=None) -> list[dict]:
+    """The fast triage list: one small row per conversation — name, total stored message count,
+    most-recent message time, the (decayed) reply status, and the 1-2 line summary. Active only
+    unless ``include_dormant``."""
+    state = state_io.read_state(state_path)
+    n_by_id = raw_store.counts(path=raw_path) if raw_path is not None else {}
+    out = []
+    for c in state.conversations:
+        if c.status != "active" and not include_dormant:
+            continue
+        out.append({
+            "chat_rowid": c.chat_rowid,
+            "name": c.name,
+            "is_group": c.is_group,
+            "message_count": n_by_id.get(c.chat_rowid, 0),
+            "last_message_at": c.last_message_at,
+            "reply_status": decayed_reply_status(c.reply_status, c.last_message_at,
+                                                 decay_days=reply_decay_days or 0, as_of=as_of),
+            "summary": c.summary,
+        })
+    return out
 
 
 def get_raw_history_impl(raw_path: Union[str, Path], conversation: int, *,
@@ -149,12 +191,25 @@ def build_app(config: Config, *, state_path: Union[str, Path], raw_path: Union[s
 
     @mcp.tool
     def get_context(tags: Optional[list] = None, since: Optional[str] = None,
-                    needs_reply: Optional[bool] = None, include_dormant: bool = False) -> dict:
+                    reply_status: Optional[str] = None, include_dormant: bool = False) -> dict:
         """The layered memory for matching conversations. Tag-filtered by current relevance; active-only
-        by default. With no `since`, returns the last `server.mcp_default_lookback_days` days."""
-        return get_context_impl(state_path, law_path=law_path, tags=tags, since=since,
-                                needs_reply=needs_reply, include_dormant=include_dormant,
-                                default_lookback_days=lookback)
+        by default. `reply_status` filters on one of: needs_response (you owe them a reply),
+        waiting_reply (they owe you one), standby (nothing owed; stale waiting_reply decays here).
+        Each match carries its live unsummarized messages in `texts_today`. With no `since`, returns
+        the last `server.mcp_default_lookback_days` days."""
+        return get_context_impl(state_path, law_path=law_path, raw_path=raw_path, tags=tags,
+                                since=since, reply_status=reply_status,
+                                include_dormant=include_dormant, default_lookback_days=lookback,
+                                reply_decay_days=config.messages.reply_decay_days,
+                                texts_today_cap=config.server.texts_today_cap)
+
+    @mcp.tool
+    def quickscan(include_dormant: bool = False) -> list:
+        """The fast triage list: per conversation — name, total message count, most-recent message
+        time, reply_status (needs_response / waiting_reply / standby), and the 1-2 line summary."""
+        return quickscan_impl(state_path, raw_path,
+                              reply_decay_days=config.messages.reply_decay_days,
+                              include_dormant=include_dormant)
 
     @mcp.tool
     def get_raw_history(conversation: int, since: Optional[str] = None,

@@ -19,7 +19,7 @@ import pytest
 
 from text_triage.state import state_io
 from text_triage.state.schema import ValidationError
-from text_triage.triage.skeleton import build_skeleton, needs_reply_gate
+from text_triage.triage.skeleton import build_skeleton, reply_status_gate
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -66,11 +66,11 @@ def test_invalid_record_never_lands(tmp_path):
 
 
 # 4 -------------------------------------------------------------------------------
-def test_needs_reply_only_when_gate_allows():
+def test_reply_status_matches_the_deterministic_gate():
     state = build_skeleton(load_export())
     for c in state.conversations:
         responded = c.last_from == "me"
-        assert c.needs_reply is needs_reply_gate(is_group=c.is_group, responded=responded)
+        assert c.reply_status == reply_status_gate(is_group=c.is_group, responded=responded)
 
 
 # 5 -------------------------------------------------------------------------------

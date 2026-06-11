@@ -1,12 +1,13 @@
 """The deterministic state-skeleton builder: turn an extract export into the DETERMINISTIC fields
 of state.json (facts owned by code), leaving every LLM-authored field blank. No LLM, no I/O."""
+import datetime
 import json
 from pathlib import Path
 
 import pytest
 
 from text_triage.state.schema import State
-from text_triage.triage.skeleton import build_skeleton, needs_reply_gate
+from text_triage.triage.skeleton import build_skeleton, decayed_reply_status, reply_status_gate
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -56,18 +57,49 @@ def conv_group(chat_rowid=2, name="Climbing Crew", members=None, last_dt="2026-0
     }
 
 
-# ---------------------------------------------------------------- needs_reply gate
+# ---------------------------------------------------------------- reply_status gate
 @pytest.mark.parametrize(
     "is_group,responded,expected",
     [
-        (False, False, True),   # 1:1, they sent last -> owe a reply
-        (False, True, False),   # 1:1, I sent last -> no
-        (True, True, False),    # groups are always "responded"
-        (True, False, False),   # groups never need a reply
+        (False, False, "needs_response"),  # 1:1, they sent last -> I owe a reply
+        (False, True, "waiting_reply"),    # 1:1, I sent last -> ball in their court
+        (True, True, "standby"),           # groups never deterministically owe a reply
+        (True, False, "standby"),
     ],
 )
-def test_needs_reply_gate(is_group, responded, expected):
-    assert needs_reply_gate(is_group=is_group, responded=responded) is expected
+def test_reply_status_gate(is_group, responded, expected):
+    assert reply_status_gate(is_group=is_group, responded=responded) == expected
+
+
+# ------------------------------------------------------------- query-time decay
+def test_waiting_reply_decays_to_standby_after_decay_days():
+    as_of = datetime.datetime(2026, 6, 10, 12, 0)
+    assert decayed_reply_status("waiting_reply", "2026-06-01 09:00",
+                                decay_days=7, as_of=as_of) == "standby"
+
+
+def test_waiting_reply_fresher_than_decay_days_is_kept():
+    as_of = datetime.datetime(2026, 6, 10, 12, 0)
+    assert decayed_reply_status("waiting_reply", "2026-06-08 09:00",
+                                decay_days=7, as_of=as_of) == "waiting_reply"
+
+
+def test_only_waiting_reply_decays():
+    as_of = datetime.datetime(2026, 6, 10, 12, 0)
+    assert decayed_reply_status("needs_response", "2026-01-01 09:00",
+                                decay_days=7, as_of=as_of) == "needs_response"
+    assert decayed_reply_status("standby", "2026-01-01 09:00",
+                                decay_days=7, as_of=as_of) == "standby"
+
+
+def test_decay_disabled_or_unparseable_date_keeps_status():
+    as_of = datetime.datetime(2026, 6, 10, 12, 0)
+    assert decayed_reply_status("waiting_reply", "2026-01-01 09:00",
+                                decay_days=0, as_of=as_of) == "waiting_reply"   # 0 = never decay
+    assert decayed_reply_status("waiting_reply", "garbage",
+                                decay_days=7, as_of=as_of) == "waiting_reply"   # lenient on bad dates
+    assert decayed_reply_status("waiting_reply", None,
+                                decay_days=7, as_of=as_of) == "waiting_reply"
 
 
 # ------------------------------------------------------------------ build_skeleton
@@ -85,7 +117,7 @@ def test_one_to_one_deterministic_fields():
     assert c.members is None
     assert c.status == "active"
     assert c.last_from == "them"
-    assert c.needs_reply is True
+    assert c.reply_status == "needs_response"
     assert c.last_message_at == "2026-05-31 14:02"
 
 
@@ -96,10 +128,10 @@ def test_llm_fields_left_blank():
     assert c.monthly is None and c.edited == {}
 
 
-def test_responded_one_to_one_does_not_need_reply():
+def test_responded_one_to_one_is_waiting_reply():
     c = build_skeleton(make_export([conv_1to1(responded=True)])).conversations[0]
     assert c.last_from == "me"
-    assert c.needs_reply is False
+    assert c.reply_status == "waiting_reply"
 
 
 def test_group_skeleton():
@@ -108,7 +140,26 @@ def test_group_skeleton():
     assert c.members == ["Alex", "Bo"]
     assert c.handle is None
     assert c.last_from == "me"
-    assert c.needs_reply is False
+    assert c.reply_status == "standby"
+
+
+# ------------------------------------------------------ deterministic reply metadata
+def test_last_from_each_side_computed_from_messages():
+    conv = conv_1to1()
+    conv["conversation"] = [
+        {"message_rowid": 1, "date": 1, "datetime": "2026-05-29 08:00", "sender": "me", "text": "hi"},
+        {"message_rowid": 2, "date": 2, "datetime": "2026-05-30 09:00", "sender": "Andrew Marks", "text": "yo"},
+        {"message_rowid": 3, "date": 3, "datetime": "2026-05-31 10:00", "sender": "me", "text": "lunch?"},
+    ]
+    c = build_skeleton(make_export([conv])).conversations[0]
+    assert c.last_from_me_at == "2026-05-31 10:00"
+    assert c.last_from_them_at == "2026-05-30 09:00"
+
+
+def test_last_from_metadata_none_when_side_absent():
+    c = build_skeleton(make_export([conv_1to1()])).conversations[0]  # single message from them
+    assert c.last_from_me_at is None
+    assert c.last_from_them_at == "2026-05-31 14:02"
 
 
 def test_unresponded_mapped_and_extra_field_dropped():

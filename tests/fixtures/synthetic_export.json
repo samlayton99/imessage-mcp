@@ -28,6 +28,7 @@
         "addresses": []
       },
       "window_messages": 2,
+      "text_count": 2,
       "conversation": [
         {
           "message_rowid": 11,
@@ -55,6 +56,7 @@
       "members": null,
       "contact_details": null,
       "window_messages": 2,
+      "text_count": 2,
       "conversation": [
         {
           "message_rowid": 5,
@@ -95,6 +97,7 @@
         "addresses": []
       },
       "window_messages": 2,
+      "text_count": 2,
       "conversation": [
         {
           "message_rowid": 3,
@@ -133,6 +136,7 @@
         "addresses": []
       },
       "window_messages": 2,
+      "text_count": 2,
       "conversation": [
         {
           "message_rowid": 1,
@@ -163,6 +167,7 @@
       ],
       "contact_details": null,
       "window_messages": 2,
+      "text_count": 2,
       "conversation": [
         {
           "message_rowid": 7,
